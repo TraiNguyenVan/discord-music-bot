@@ -97,26 +97,59 @@ def _event(guild_id: int | str, msg: str):
     print(f"[event] guild={guild_id} {msg}", flush=True)
 
 
+async def _safe_defer(inter: discord.Interaction, ephemeral: bool = False, retries: int = 1):
+    """Defer with one retry on transient network/DNS failures.
+    Raises the last error if all attempts fail (caller decides)."""
+    import aiohttp as _aiohttp
+
+    delay = 2.0
+    for attempt in range(retries + 1):
+        try:
+            if not inter.response.is_done():
+                await inter.response.defer(ephemeral=ephemeral)
+            return
+        except (discord.NotFound, discord.HTTPException):
+            raise  # definitive answer from Discord: never worth retrying
+        except (_aiohttp.ClientError, OSError) as e:
+            if attempt >= retries:
+                print(f"[net-retry] defer FAILED after {attempt + 1} tries: {e}", flush=True)
+                raise
+            print(f"[net-retry] defer blip, retrying in {delay}s: {e}", flush=True)
+            await asyncio.sleep(delay)
+
+
 class SearchView(discord.ui.View):
-    def __init__(self, cog: "Music", guild_id: int, tracks: list[Track], timeout: float = 60):
+    def __init__(self, cog: "Music", guild_id: int, tracks: list[Track], timeout: float = 1800):
         super().__init__(timeout=timeout)
         self.cog = cog
         self.guild_id = guild_id
         self.tracks = tracks[:5]
+        self.birth = int(time.time())
         for i, t in enumerate(self.tracks):
-            btn = discord.ui.Button(label=str(i + 1), style=discord.ButtonStyle.primary)
+            btn = discord.ui.Button(
+                label=str(i + 1),
+                style=discord.ButtonStyle.primary,
+                custom_id=f"pick:{self.birth}:{i}",
+            )
 
             async def _cb(inter: discord.Interaction, idx=i):
                 # Button presses are new interactions: defer FIRST or Discord
                 # shows "didn't respond" while yt-dlp connects + streams.
                 try:
                     if not inter.response.is_done():
-                        await inter.response.defer()
+                        await _safe_defer(inter, ephemeral=True)
                 except discord.NotFound:
-                    return  # user clicked stale/expired buttons
+                    _event(self.guild_id, f"pick-ack-expired idx={idx+1} by={inter.user}")
+                    try:
+                        await inter.followup.send(
+                            "⚠️ That press arrived too late — press the number again.", ephemeral=True)
+                    except discord.HTTPException:
+                        pass
+                    return  # stale press or ack arrived past the 3s window
                 try:
                     picked = self.tracks[idx]
                     _event(self.guild_id, f"search-pick #{idx+1} title={picked.title!r} by={inter.user}")
+                    self._lock()  # disable row: press counted, no double-queues
                     await self.cog._queue_track(inter, picked)
                 except Exception as e:  # noqa: BLE001
                     try:
@@ -126,6 +159,23 @@ class SearchView(discord.ui.View):
 
             btn.callback = _cb
             self.add_item(btn)
+
+    def _lock(self):
+        for item in self.children:
+            item.disabled = True
+
+    async def on_timeout(self):
+        self._lock()
+        _event(self.guild_id, "picker expired (30 min), buttons disabled")
+        # best-effort: message may be gone; never raise from timeout
+        try:
+            if self.message is not None:
+                em = self.message.embeds[0] if self.message.embeds else None
+                if em is not None:
+                    em.set_footer(text="⏰ Expired — run /search again for fresh buttons.")
+                    await self.message.edit(embed=em, view=self)
+        except discord.HTTPException:
+            pass
 
 
 class AddSongModal(discord.ui.Modal, title="Add music"):
@@ -497,7 +547,8 @@ class Music(commands.Cog):
         )
         em = discord.Embed(title=f"🔎 Results for: {query}", description=desc, colour=discord.Colour.green())
         em.set_footer(text="Tip: 'artist - title' finds the exact song; plain words favor mixes.")
-        await inter.followup.send(embed=em, view=SearchView(self, inter.guild.id, tracks), ephemeral=ephemeral)  # type: ignore
+        await inter.followup.send(
+            embed=em, view=SearchView(self, inter.guild.id, tracks, timeout=1800), ephemeral=ephemeral)  # type: ignore
 
     def _do_skip(self, guild: discord.Guild, member: discord.Member) -> str:
         st = self.state(guild.id)
