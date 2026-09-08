@@ -1,0 +1,7 @@
+services:
+  music-bot:
+    build: .
+    env_file:
+      - .env
+    restart: unless-stopped
+    # cookies.txt is read from the project dir if present (see .env.example)
