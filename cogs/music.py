@@ -23,6 +23,8 @@ class Track:
     uploader: str
     requester: str
     requester_id: int
+    needs_resolve: bool = False  # flat listing: stream_url is placeholder until lazy deep resolve
+    resolved_at: float = 0.0  # epoch of last successful deep stream resolve
 
 
 def _is_url(s: str) -> bool:
@@ -150,6 +152,12 @@ class SearchView(discord.ui.View):
                     picked = self.tracks[idx]
                     _event(self.guild_id, f"search-pick #{idx+1} title={picked.title!r} by={inter.user}")
                     self._lock()  # disable row: press counted, no double-queues
+                    if picked.needs_resolve:
+                        ok = await self.cog._ensure_stream(picked)
+                        if not ok:
+                            await inter.followup.send(
+                                "❌ That pick expired, try another number.", ephemeral=True)
+                            return
                     await self.cog._queue_track(inter, picked)
                 except Exception as e:  # noqa: BLE001
                     try:
@@ -358,17 +366,26 @@ class Music(commands.Cog):
     def state(self, guild_id: int) -> GuildState:
         return self.states.setdefault(guild_id, GuildState())
 
-    async def _extract(self, query: str, playlist: bool = False, search_n: int = 0) -> list[dict]:
-        opts = get_ydl_opts(playlist=playlist, search_n=search_n)
+    async def _extract(self, query: str, playlist: bool = False, search_n: int = 0, flat: bool = False) -> list[dict]:
+        opts = get_ydl_opts(playlist=playlist, search_n=search_n, flat=flat)
         loop = self.bot.loop
+        # flat listing ignores default_search routing (falls through to
+        # generic extractor), so prefix explicitly: ytsearchN:query
+        eff_query = query
+        if flat and search_n > 0 and not query.startswith("http"):
+            eff_query = f"ytsearch{search_n}:{query}"
 
         def _run():
             with yt_dlp.YoutubeDL(opts) as ydl:
                 # gentle pacing: playlists fire many requests fast
-                info = ydl.extract_info(query, download=False)
+                info = ydl.extract_info(eff_query, download=False)
                 return info
 
+        t0 = time.time()
         info = await loop.run_in_executor(None, _run)
+        dt = time.time() - t0
+        n = len(info.get("entries", [])) if isinstance(info, dict) else 1
+        print(f"[extract] flat={flat} n={search_n or n} took={dt:.1f}s query={query[:60]!r}", flush=True)
         if not info:
             return []
         if "entries" in info and info["entries"]:
@@ -376,9 +393,35 @@ class Music(commands.Cog):
             return [e for e in info["entries"] if e]
         return [info]
 
-    def _to_track(self, data: dict, requester: discord.abc.User) -> Track | None:
+    def _to_track(self, data: dict, requester: discord.abc.User, flat: bool = False) -> Track | None:
+        vid = data.get("id")
+        page = data.get("webpage_url") or data.get("original_url")
+        if flat:
+            # flat listing: no stream URL yet, only metadata. Lazy-resolve on pick.
+            if not page and vid:
+                page = f"https://www.youtube.com/watch?v={vid}"
+            url = data.get("url")
+            if url and not url.startswith("http") and vid:
+                page = f"https://www.youtube.com/watch?v={vid}"
+            if not page:
+                return None
+            title = data.get("title") or "Unknown title"
+            thumbs = data.get("thumbnails") or []
+            thumb = thumbs[-1].get("url") if thumbs else data.get("thumbnail")
+            return Track(
+                title=title,
+                webpage_url=page,
+                stream_url=page,  # placeholder until lazy deep resolve
+                duration=int(data.get("duration") or 0),
+                thumbnail=thumb,
+                uploader=str(data.get("channel") or data.get("uploader") or "?"),
+                requester=getattr(requester, "display_name", str(requester)),
+                requester_id=requester.id,
+                needs_resolve=True,
+            )
         url = data.get("url")
-        page = data.get("webpage_url") or data.get("original_url") or url
+        if not page:
+            page = url
         title = data.get("title") or "Unknown title"
         if not url or not page:
             return None
@@ -397,13 +440,33 @@ class Music(commands.Cog):
 
     async def _refresh_stream(self, track: Track) -> str:
         """Re-resolve a fresh stream URL (old ones expire). Falls back to cached."""
+        if time.time() - track.resolved_at < 1800 and track.stream_url.startswith("http"):
+            return track.stream_url  # just resolved (e.g. lazy pick resolve), reuse it
         try:
             infos = await self._extract(track.webpage_url)
             if infos and infos[0].get("url"):
                 track.stream_url = infos[0]["url"]
+                track.resolved_at = time.time()
         except Exception:
             pass
         return track.stream_url
+
+    async def _ensure_stream(self, track: Track) -> bool:
+        """Lazy deep resolve for flat-listing picks. Returns True on success."""
+        if not track.needs_resolve:
+            return True
+        try:
+            infos = await self._extract(track.webpage_url)
+            if infos and infos[0].get("url"):
+                track.stream_url = infos[0]["url"]
+                if infos[0].get("duration"):
+                    track.duration = int(infos[0]["duration"])
+                track.resolved_at = time.time()
+                track.needs_resolve = False
+                return True
+        except Exception as e:  # noqa: BLE001
+            print(f"[extract] lazy resolve FAILED url={track.webpage_url!r} err={e}", flush=True)
+        return False
 
     async def _ensure_voice(self, inter: discord.Interaction) -> discord.VoiceClient | None:
         user = inter.user
@@ -523,10 +586,10 @@ class Music(commands.Cog):
     async def _resolve_input(self, user: discord.abc.User, query: str) -> tuple[str, list[Track]]:
         """Smart router shared by /play and the panel Add box.
         Returns (kind, tracks). kind is 'playlist' | 'url' | 'search'.
-        - playlist link (has list=) -> full playlist, uncapped
-        - video link -> single resolve
-        - text -> ranked top-5 candidates for a pick list (over-fetched:
-          most entries are gated on datacenter IPs)
+        - playlist link (has list=) -> full playlist, uncapped (deep)
+        - video link -> single resolve (deep)
+        - text -> flat listing top-5 for a fast pick list; stream URL
+          lazy-resolved only after the user picks a number
         """
         q = query.strip()
         if "list=" in q and _is_url(q):
@@ -535,8 +598,8 @@ class Music(commands.Cog):
         if _is_url(q):
             infos = await self._extract(q)
             return ("url", [t for t in (self._to_track(d, user) for d in infos[:1]) if t])
-        infos = _rank_search(q, await self._extract(q, search_n=25))
-        return ("search", [t for t in (self._to_track(d, user) for d in infos[:5]) if t])
+        infos = _rank_search(q, await self._extract(q, search_n=10, flat=True))
+        return ("search", [t for t in (self._to_track(d, user, flat=True) for d in infos[:5]) if t])
 
     async def _send_picker(self, inter: discord.Interaction, query: str, tracks: list[Track], ephemeral: bool = False):
         """Post the 1-5 pick list. Caller must have deferred already."""
@@ -692,13 +755,13 @@ class Music(commands.Cog):
     async def search(self, inter: discord.Interaction, query: str):
         await inter.response.defer()
         try:
-            # over-fetch: most entries are IP-gated dead weight, filter to playable
-            infos = _rank_search(query, await self._extract(query, search_n=25))
+            # flat listing: metadata only, fast. Stream resolves lazily on pick.
+            infos = _rank_search(query, await self._extract(query, search_n=10, flat=True))
         except Exception as e:  # noqa: BLE001
             _event(inter.guild.id, f"search FAILED query={query!r} err={e}")  # type: ignore
             await inter.followup.send(f"❌ Search failed: `{e}`")
             return
-        tracks = [t for t in (self._to_track(d, inter.user) for d in infos[:5]) if t]
+        tracks = [t for t in (self._to_track(d, inter.user, flat=True) for d in infos[:5]) if t]
         if not tracks:
             await inter.followup.send("❌ No results. Try `artist - title` format.")
             return

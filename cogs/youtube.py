@@ -7,11 +7,13 @@ def _force_ipv4() -> bool:
     return os.getenv("YDL_FORCE_IPV4", "true").lower() in ("1", "true", "yes")
 
 
-def get_ydl_opts(playlist: bool = False, search_n: int = 0) -> dict:
+def get_ydl_opts(playlist: bool = False, search_n: int = 0, flat: bool = False) -> dict:
     # NOTE: no extractor_args override. yt-dlp's built-in default clients
     # change every few weeks to dodge YouTube's bot checks — pinning
     # player_client (tv/android/...) goes stale and causes
     # "page needs to be reloaded" / error 152. Rely on stock defaults.
+    # flat=True is for search LISTING only: metadata without stream URLs,
+    # lean timeouts so gated entries fail fast instead of burning retries.
     opts: dict = {
         "format": "bestaudio/best",
         "noplaylist": not playlist,
@@ -25,6 +27,12 @@ def get_ydl_opts(playlist: bool = False, search_n: int = 0) -> dict:
         "retries": 3,
         "fragment_retries": 3,
     }
+    if flat:
+        opts["extract_flat"] = True
+        opts["skip_download"] = True
+        opts["socket_timeout"] = 8
+        opts["retries"] = 1
+        opts["fragment_retries"] = 1
     if _force_ipv4():
         opts["source_address"] = "0.0.0.0"
     if os.path.exists(COOKIE_FILE):
