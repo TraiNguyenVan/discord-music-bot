@@ -4,4 +4,8 @@ services:
     env_file:
       - .env
     restart: unless-stopped
+    # host dnsmasq cache on the bridge gateway first, upstream fallback
+    dns:
+      - 172.19.0.1
+      - 1.1.1.1
     # cookies.txt is read from the project dir if present (see .env.example)

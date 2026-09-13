@@ -3,3 +3,8 @@ cookies.txt
 __pycache__/
 *.pyc
 venv/
+.env.*.local
+data/
+*.log
+.DS_Store
+.venv/

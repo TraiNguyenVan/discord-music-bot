@@ -51,5 +51,9 @@ def get_ydl_opts(playlist: bool = False, search_n: int = 0, flat: bool = False) 
     return opts
 
 
-FFMPEG_BEFORE = "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
+# -reconnect*: ride out brief blips. -rw_timeout: a stream with zero bytes
+# for 20s is dead (half-open stall) — error out so the after-chain advances
+# instead of hanging forever (26-min stuck FFmpeg observed). -timeout: fail
+# hanging opens fast. Times are microseconds.
+FFMPEG_BEFORE = "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -rw_timeout 20000000 -timeout 20000000"
 FFMPEG_OPTIONS = "-vn"

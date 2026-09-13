@@ -61,6 +61,20 @@ if __name__ == "__main__":
     if not TOKEN:
         raise SystemExit("Missing DISCORD_TOKEN. Copy .env.example to .env and set it.")
     import logging
+    import time as _time
+
+    import aiohttp as _aiohttp
 
     logging.basicConfig(level=getattr(logging, LOG_LEVEL, logging.INFO))
-    bot.run(TOKEN)
+    # Startup retry: a DNS blip during login must not kill the process.
+    # bot.run() exits on first ClientConnectorError; Docker would restart
+    # the container (~15s offline). Retrying in-process recovers in ~5s.
+    for _attempt in range(1, 6):
+        try:
+            bot.run(TOKEN)
+            break
+        except (_aiohttp.ClientError, OSError) as e:
+            print(f"[startup] login attempt {_attempt} failed (network): {e}", flush=True)
+            if _attempt >= 5:
+                raise
+            _time.sleep(5 * _attempt)
