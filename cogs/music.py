@@ -4,6 +4,7 @@ import os
 import random
 import time
 from dataclasses import dataclass, field
+from urllib.parse import parse_qs, urlparse
 
 import discord
 import yt_dlp
@@ -30,6 +31,20 @@ class Track:
 def _is_url(s: str) -> bool:
     s = s.strip().lower()
     return s.startswith("http") or "youtube.com/" in s or "youtu.be/" in s
+
+
+def _get_playlist_start_index(url: str) -> int:
+    """Extract 1-based start index from URL if &index=N is present, default to 1."""
+    try:
+        parsed = urlparse(url)
+        qs = parse_qs(parsed.query)
+        idx_strs = qs.get("index", [])
+        if idx_strs:
+            idx = int(idx_strs[0])
+            return max(1, idx)
+    except Exception:
+        pass
+    return 1
 
 
 def _rank_search(query: str, datas: list[dict]) -> list[dict]:
@@ -84,6 +99,7 @@ class GuildState:
     fast_fails: int = 0  # consecutive instant stream deaths; breaker trips at 3
     last_playlist_url: str | None = None
     last_playlist_page: int = 1
+    last_playlist_start_index: int = 1  # &index=N from the original URL, 1-based
     last_playlist_has_more: bool = True
 
 
@@ -208,12 +224,21 @@ class SearchView(discord.ui.View):
 
 
 class PlaylistNextView(discord.ui.View):
-    def __init__(self, cog: "Music", guild_id: int, url: str, current_page: int = 1, timeout: float = 1800):
+    def __init__(
+        self,
+        cog: "Music",
+        guild_id: int,
+        url: str,
+        current_page: int = 1,
+        start_index: int = 1,
+        timeout: float = 1800,
+    ):
         super().__init__(timeout=timeout)
         self.cog = cog
         self.guild_id = guild_id
         self.url = url
         self.current_page = current_page
+        self.start_index = start_index  # &index=N from the original URL, 1-based
         self.birth = int(time.time())
 
         self.btn = discord.ui.Button(
@@ -240,8 +265,10 @@ class PlaylistNextView(discord.ui.View):
         st = self.cog.state(self.guild_id)
         # Check that this guild still tracks this playlist
         next_page = self.current_page + 1
-        p_start = (next_page - 1) * 25 + 1
-        p_end = next_page * 25
+        # page 1 covers items [start_index, start_index + 24]; each later page
+        # continues from there (page 2 with index=12 -> items 37-61, etc.)
+        p_start = self.start_index + (next_page - 1) * 25
+        p_end = p_start + 24
 
         _event(self.guild_id, f"plnext-fetch url={self.url!r} page={next_page} start={p_start} end={p_end} by={inter.user}")
 
@@ -367,15 +394,19 @@ class AddSongModal(discord.ui.Modal, title="Add music"):
             st.queue.extend(tracks)
             st.last_playlist_url = q
             st.last_playlist_page = 1
+            st.last_playlist_start_index = _get_playlist_start_index(q)
             st.last_playlist_has_more = len(tracks) >= 25
             _event(inter.guild.id, f"panel-add playlist n={len(tracks)} by={inter.user}")  # type: ignore
 
-            view = PlaylistNextView(self.cog, inter.guild.id, q, current_page=1) if st.last_playlist_has_more else None
+            view = (
+                PlaylistNextView(self.cog, inter.guild.id, q, current_page=1, start_index=st.last_playlist_start_index)
+                if st.last_playlist_has_more else None
+            )
 
             if was_idle:
                 await self.cog._play_next(inter.guild)  # type: ignore
             await inter.followup.send(
-                f"📃 Added **{len(tracks)} tracks** to queue (page 1).",
+                f"📃 Added **{len(tracks)} tracks** to queue (items {st.last_playlist_start_index}-{st.last_playlist_start_index + len(tracks) - 1}).",
                 ephemeral=True,
                 view=view,
             )
@@ -549,6 +580,7 @@ class Music(commands.Cog):
         st.fast_fails = 0
         st.last_playlist_url = None
         st.last_playlist_page = 1
+        st.last_playlist_start_index = 1
         st.last_playlist_has_more = True
         if st.leave_task and not st.leave_task.done():
             st.leave_task.cancel()
@@ -906,7 +938,13 @@ class Music(commands.Cog):
         """
         q = query.strip()
         if "list=" in q and _is_url(q):
-            infos = await self._extract(q, playlist=True)
+            # &index=N (YouTube's "start here" position) shifts the window:
+            # fetch items N..N+24 instead of 1..25, and the Load-next button
+            # continues from N+25 onward.
+            start_index = _get_playlist_start_index(q)
+            infos = await self._extract(
+                q, playlist=True, playlist_start=start_index, playlist_end=start_index + 24
+            )
             return ("playlist", [t for t in (self._to_track(d, user) for d in infos) if t])
         if _is_url(q):
             infos = await self._extract(q)
@@ -1092,21 +1130,25 @@ class Music(commands.Cog):
             st.queue.extend(tracks)
             st.last_playlist_url = query
             st.last_playlist_page = 1
+            st.last_playlist_start_index = _get_playlist_start_index(query)
             st.last_playlist_has_more = len(tracks) >= 25
             _event(inter.guild.id, f"play-playlist n={len(tracks)} by={inter.user}")  # type: ignore
 
-            view = PlaylistNextView(self, inter.guild.id, query, current_page=1) if st.last_playlist_has_more else None
+            view = (
+                PlaylistNextView(self, inter.guild.id, query, current_page=1, start_index=st.last_playlist_start_index)
+                if st.last_playlist_has_more else None
+            )
 
             if was_idle:
                 await self._play_next(inter.guild)  # type: ignore
                 await inter.followup.send(
-                    f"📃 Queued playlist: **{len(tracks)} tracks** (page 1).",
+                    f"📃 Queued playlist: **{len(tracks)} tracks** (items {st.last_playlist_start_index}-{st.last_playlist_start_index + len(tracks) - 1}).",
                     embed=self._now_playing_embed(st),
                     view=view,
                 )
             else:
                 await inter.followup.send(
-                    f"📃 Added **{len(tracks)} tracks** to queue (page 1).",
+                    f"📃 Added **{len(tracks)} tracks** to queue (items {st.last_playlist_start_index}-{st.last_playlist_start_index + len(tracks) - 1}).",
                     view=view,
                 )
             await self._update_panel(inter.guild.id)  # type: ignore
@@ -1155,7 +1197,10 @@ class Music(commands.Cog):
                 pass
             return
         try:
-            infos = await self._extract(url, playlist=True)
+            start_index = _get_playlist_start_index(url)
+            infos = await self._extract(
+                url, playlist=True, playlist_start=start_index, playlist_end=start_index + 24
+            )
         except Exception as e:  # noqa: BLE001
             _event(inter.guild.id, f"playlist FAILED url={url!r} err={e}")  # type: ignore
             await inter.followup.send(f"❌ Playlist failed: `{e}`")
@@ -1172,20 +1217,24 @@ class Music(commands.Cog):
         st.queue.extend(tracks)
         st.last_playlist_url = url
         st.last_playlist_page = 1
+        st.last_playlist_start_index = _get_playlist_start_index(url)
         st.last_playlist_has_more = len(tracks) >= 25
 
-        view = PlaylistNextView(self, inter.guild.id, url, current_page=1) if st.last_playlist_has_more else None
+        view = (
+            PlaylistNextView(self, inter.guild.id, url, current_page=1, start_index=st.last_playlist_start_index)
+            if st.last_playlist_has_more else None
+        )
 
         if was_idle:
             await self._play_next(inter.guild)  # type: ignore
             await inter.followup.send(
-                f"📃 Queued playlist: **{len(tracks)} tracks** (page 1).",
+                f"📃 Queued playlist: **{len(tracks)} tracks** (items {st.last_playlist_start_index}-{st.last_playlist_start_index + len(tracks) - 1}).",
                 embed=self._now_playing_embed(st),
                 view=view,
             )
         else:
             await inter.followup.send(
-                f"📃 Added **{len(tracks)} tracks** to queue (page 1).",
+                f"📃 Added **{len(tracks)} tracks** to queue (items {st.last_playlist_start_index}-{st.last_playlist_start_index + len(tracks) - 1}).",
                 view=view,
             )
 
