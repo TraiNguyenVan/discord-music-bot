@@ -82,6 +82,9 @@ class GuildState:
     last_skip_at: float = 0.0  # time.time() of last accepted skip: double-taps inside the window are no-ops
     self_disconnect: bool = False  # True while OUR OWN disconnect() is in flight (vs external drop)
     fast_fails: int = 0  # consecutive instant stream deaths; breaker trips at 3
+    last_playlist_url: str | None = None
+    last_playlist_page: int = 1
+    last_playlist_has_more: bool = True
 
 
 def fmt_duration(sec: int) -> str:
@@ -204,6 +207,121 @@ class SearchView(discord.ui.View):
             pass
 
 
+class PlaylistNextView(discord.ui.View):
+    def __init__(self, cog: "Music", guild_id: int, url: str, current_page: int = 1, timeout: float = 1800):
+        super().__init__(timeout=timeout)
+        self.cog = cog
+        self.guild_id = guild_id
+        self.url = url
+        self.current_page = current_page
+        self.birth = int(time.time())
+
+        self.btn = discord.ui.Button(
+            label=f"📥 Load next 25 (page {self.current_page + 1})",
+            style=discord.ButtonStyle.secondary,
+            custom_id=f"plnext:{self.birth}:{self.guild_id}",
+        )
+        self.btn.callback = self._on_click
+        self.add_item(self.btn)
+
+    async def _on_click(self, inter: discord.Interaction):
+        try:
+            if not inter.response.is_done():
+                await _safe_defer(inter, ephemeral=True)
+        except discord.NotFound:
+            _event(self.guild_id, f"plnext-ack-expired by={inter.user}")
+            return
+
+        user = inter.user
+        if not isinstance(user, discord.Member) or not user.voice or not user.voice.channel:
+            await inter.followup.send("Join a voice channel first.", ephemeral=True)
+            return
+
+        st = self.cog.state(self.guild_id)
+        # Check that this guild still tracks this playlist
+        next_page = self.current_page + 1
+        p_start = (next_page - 1) * 25 + 1
+        p_end = next_page * 25
+
+        _event(self.guild_id, f"plnext-fetch url={self.url!r} page={next_page} start={p_start} end={p_end} by={inter.user}")
+
+        try:
+            infos = await self.cog._extract(
+                self.url,
+                playlist=True,
+                playlist_start=p_start,
+                playlist_end=p_end,
+            )
+        except Exception as e:  # noqa: BLE001
+            _event(self.guild_id, f"plnext FAILED err={e}")
+            await inter.followup.send(f"❌ Failed fetching next batch: `{e}`", ephemeral=True)
+            return
+
+        tracks = [t for t in (self.cog._to_track(d, inter.user) for d in infos) if t]
+        if not tracks:
+            self.btn.disabled = True
+            self.btn.label = "✅ End of playlist"
+            self.btn.style = discord.ButtonStyle.secondary
+            try:
+                if inter.message:
+                    await inter.message.edit(view=self)
+            except Exception:
+                pass
+            await inter.followup.send("No more tracks found in playlist.", ephemeral=True)
+            return
+
+        vc = await self.cog._ensure_voice(inter)
+        if vc is None:
+            return
+
+        was_idle = not vc.is_playing() and not vc.is_paused() and st.current is None
+        st.queue.extend(tracks)
+        st.last_playlist_url = self.url
+        st.last_playlist_page = next_page
+        self.current_page = next_page
+
+        if len(tracks) < 25:
+            self.btn.disabled = True
+            self.btn.label = f"✅ End of playlist ({len(tracks)} added)"
+            self.btn.style = discord.ButtonStyle.secondary
+        else:
+            self.btn.label = f"📥 Load next 25 (page {next_page + 1})"
+
+        try:
+            if inter.message:
+                await inter.message.edit(view=self)
+        except Exception:
+            pass
+
+        if was_idle:
+            await self.cog._play_next(inter.guild)  # type: ignore
+            await inter.followup.send(
+                f"📃 Queued **{len(tracks)} more tracks** (page {next_page}).",
+                embed=self.cog._now_playing_embed(st),
+                ephemeral=True,
+            )
+        else:
+            await inter.followup.send(
+                f"📃 Added **{len(tracks)} more tracks** to queue (page {next_page}).",
+                ephemeral=True,
+            )
+        await self.cog._update_panel(self.guild_id)
+
+    def _lock(self):
+        for item in self.children:
+            item.disabled = True
+
+    async def on_timeout(self):
+        self._lock()
+        _event(self.guild_id, "plnext expired, button disabled")
+        try:
+            msg = getattr(self, "message", None)
+            if msg is not None:
+                await msg.edit(view=self)
+        except Exception:
+            pass
+
+
 class AddSongModal(discord.ui.Modal, title="Add music"):
     query = discord.ui.TextInput(
         label="Song, video link, or playlist link",
@@ -247,10 +365,20 @@ class AddSongModal(discord.ui.Modal, title="Add music"):
         if kind == "playlist":
             was_idle = not vc.is_playing() and not vc.is_paused() and st.current is None
             st.queue.extend(tracks)
+            st.last_playlist_url = q
+            st.last_playlist_page = 1
+            st.last_playlist_has_more = len(tracks) >= 25
             _event(inter.guild.id, f"panel-add playlist n={len(tracks)} by={inter.user}")  # type: ignore
+
+            view = PlaylistNextView(self.cog, inter.guild.id, q, current_page=1) if st.last_playlist_has_more else None
+
             if was_idle:
                 await self.cog._play_next(inter.guild)  # type: ignore
-            await inter.followup.send(f"📃 Added **{len(tracks)} tracks**.", ephemeral=True)
+            await inter.followup.send(
+                f"📃 Added **{len(tracks)} tracks** to queue (page 1).",
+                ephemeral=True,
+                view=view,
+            )
         else:
             await self.cog._queue_track(inter, tracks[0], quiet=True)
         await self.cog._update_panel(inter.guild.id)  # type: ignore
@@ -419,6 +547,9 @@ class Music(commands.Cog):
         st._skip_stop = False
         st.self_disconnect = False
         st.fast_fails = 0
+        st.last_playlist_url = None
+        st.last_playlist_page = 1
+        st.last_playlist_has_more = True
         if st.leave_task and not st.leave_task.done():
             st.leave_task.cancel()
         st.leave_task = None
@@ -433,8 +564,22 @@ class Music(commands.Cog):
         except Exception:
             st.self_disconnect = False
 
-    async def _extract(self, query: str, playlist: bool = False, search_n: int = 0, flat: bool = False) -> list[dict]:
-        opts = get_ydl_opts(playlist=playlist, search_n=search_n, flat=flat)
+    async def _extract(
+        self,
+        query: str,
+        playlist: bool = False,
+        search_n: int = 0,
+        flat: bool = False,
+        playlist_start: int = 1,
+        playlist_end: int = 25,
+    ) -> list[dict]:
+        opts = get_ydl_opts(
+            playlist=playlist,
+            search_n=search_n,
+            flat=flat,
+            playlist_start=playlist_start,
+            playlist_end=playlist_end,
+        )
         loop = self.bot.loop
         # listings (search/playlist) are the hammering risk: pace them globally.
         # Single-video deep resolves (picks/plays) stay instant.
@@ -460,7 +605,7 @@ class Music(commands.Cog):
         if not info:
             return []
         if "entries" in info and info["entries"]:
-            # no cap: full playlist / full search results
+            # playlist capped at 25 (yt-dlp playlistend)
             return [e for e in info["entries"] if e]
         return [info]
 
@@ -754,7 +899,7 @@ class Music(commands.Cog):
     async def _resolve_input(self, user: discord.abc.User, query: str) -> tuple[str, list[Track]]:
         """Smart router shared by /play and the panel Add box.
         Returns (kind, tracks). kind is 'playlist' | 'url' | 'search'.
-        - playlist link (has list=) -> full playlist, uncapped (deep)
+        - playlist link (has list=) -> playlist capped to first 25 (deep)
         - video link -> single resolve (deep)
         - text -> flat listing top-5 for a fast pick list; stream URL
           lazy-resolved only after the user picks a number
@@ -945,12 +1090,25 @@ class Music(commands.Cog):
             st = self.state(inter.guild.id)  # type: ignore
             was_idle = not vc.is_playing() and not vc.is_paused() and st.current is None
             st.queue.extend(tracks)
+            st.last_playlist_url = query
+            st.last_playlist_page = 1
+            st.last_playlist_has_more = len(tracks) >= 25
             _event(inter.guild.id, f"play-playlist n={len(tracks)} by={inter.user}")  # type: ignore
+
+            view = PlaylistNextView(self, inter.guild.id, query, current_page=1) if st.last_playlist_has_more else None
+
             if was_idle:
                 await self._play_next(inter.guild)  # type: ignore
-                await inter.followup.send(f"📃 Queued playlist: **{len(tracks)} tracks**.", embed=self._now_playing_embed(st))
+                await inter.followup.send(
+                    f"📃 Queued playlist: **{len(tracks)} tracks** (page 1).",
+                    embed=self._now_playing_embed(st),
+                    view=view,
+                )
             else:
-                await inter.followup.send(f"📃 Added **{len(tracks)} tracks** to queue.")
+                await inter.followup.send(
+                    f"📃 Added **{len(tracks)} tracks** to queue (page 1).",
+                    view=view,
+                )
             await self._update_panel(inter.guild.id)  # type: ignore
             return
         await self._queue_track(inter, tracks[0])
@@ -982,7 +1140,7 @@ class Music(commands.Cog):
             return
         await self._send_picker(inter, query, tracks)
 
-    @app_commands.command(name="playlist", description="Queue a full YouTube playlist (no limit)")
+    @app_commands.command(name="playlist", description="Queue a YouTube playlist (first 25 tracks)")
     @app_commands.describe(url="Playlist URL")
     async def playlist(self, inter: discord.Interaction, url: str):
         try:
@@ -1012,11 +1170,24 @@ class Music(commands.Cog):
         st = self.state(inter.guild.id)  # type: ignore
         was_idle = not vc.is_playing() and not vc.is_paused() and st.current is None
         st.queue.extend(tracks)
+        st.last_playlist_url = url
+        st.last_playlist_page = 1
+        st.last_playlist_has_more = len(tracks) >= 25
+
+        view = PlaylistNextView(self, inter.guild.id, url, current_page=1) if st.last_playlist_has_more else None
+
         if was_idle:
             await self._play_next(inter.guild)  # type: ignore
-            await inter.followup.send(f"📃 Queued playlist: **{len(tracks)} tracks**.", embed=self._now_playing_embed(st))
+            await inter.followup.send(
+                f"📃 Queued playlist: **{len(tracks)} tracks** (page 1).",
+                embed=self._now_playing_embed(st),
+                view=view,
+            )
         else:
-            await inter.followup.send(f"📃 Added **{len(tracks)} tracks** to queue.")
+            await inter.followup.send(
+                f"📃 Added **{len(tracks)} tracks** to queue (page 1).",
+                view=view,
+            )
 
     @app_commands.command(name="skip", description="Skip the current track")
     async def skip(self, inter: discord.Interaction):

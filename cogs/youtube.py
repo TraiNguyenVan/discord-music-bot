@@ -7,7 +7,13 @@ def _force_ipv4() -> bool:
     return os.getenv("YDL_FORCE_IPV4", "true").lower() in ("1", "true", "yes")
 
 
-def get_ydl_opts(playlist: bool = False, search_n: int = 0, flat: bool = False) -> dict:
+def get_ydl_opts(
+    playlist: bool = False,
+    search_n: int = 0,
+    flat: bool = False,
+    playlist_start: int = 1,
+    playlist_end: int = 25,
+) -> dict:
     # NOTE: no extractor_args override. yt-dlp's built-in default clients
     # change every few weeks to dodge YouTube's bot checks — pinning
     # player_client (tv/android/...) goes stale and causes
@@ -38,8 +44,10 @@ def get_ydl_opts(playlist: bool = False, search_n: int = 0, flat: bool = False) 
     if os.path.exists(COOKIE_FILE):
         opts["cookiefile"] = COOKIE_FILE
     if playlist:
-        # full playlist, no track cap; flat listing keeps it fast
+        # full playlist capped at 25; flat listing keeps it fast
         opts["extract_flat"] = "discard_in_playlist"
+        opts["playliststart"] = playlist_start
+        opts["playlistend"] = playlist_end
         # playlists often contain dead/private entries — skip, don't fail all
         opts["ignoreerrors"] = True
     if search_n > 0:

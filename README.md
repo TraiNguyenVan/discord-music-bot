@@ -12,7 +12,7 @@ A resilient Discord music bot — slash commands + persistent panel, YouTube via
 
 - **Slash + panel:** `/music` opens a persistent control panel (Add / Pause / Skip / Stop / Shuffle / Loop / Vol / Queue / Refresh). Also `/play /search /playlist /queue /nowplaying /skip /pause /resume /stop /remove /clear /shuffle /loop /volume /join /leave`.
 - **Fast search:** text → ranked top-5 picker (prefers official/short over mixes/lives) with lazy deep resolve; links/playlists resolve directly.
-- **Uncapped playlists:** full YouTube playlists, no track cap.
+- **Playlists with pagination:** fetches 25 tracks initially, with an interactive `📥 Load next 25` button on the message to load subsequent batches on demand without hitting YouTube IP bans.
 - **Stay-in-voice:** bot stays until explicit leave; 12h idle safety net only (`INACTIVITY_TIMEOUT`).
 - **Resilient voice:** auto-rejoin on drops, zombie-client heal, FFmpeg reconnect + 20s stall breaker, hot-spin breaker (3 instant deaths → advance).
 - **Skip:** instant for anyone, debounced (`SKIP_DEBOUNCE_SEC=1.5`) so double-taps don't drain the queue. `loop=off|track|queue` respected.
@@ -66,9 +66,9 @@ python bot.py
 | Command | What it does |
 |---|---|
 | `/music` | Open the persistent panel (one per server, survives restarts) |
-| `/play <query>` | URL → plays; `list=` → full playlist; text → picker |
+| `/play <query>` | URL → plays; `list=` → first 25 of playlist; text → picker |
 | `/search <text>` | Top-5 YouTube picks |
-| `/playlist <url>` | Queue full playlist |
+| `/playlist <url>` | Queue first 25 of playlist |
 | `/queue [page]` | Show queue (10/page) |
 | `/skip` | Skip one (debounced) |
 | `/pause` `/resume` `/stop` | Transport |
