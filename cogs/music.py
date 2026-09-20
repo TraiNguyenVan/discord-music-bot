@@ -101,6 +101,7 @@ class GuildState:
     last_playlist_page: int = 1
     last_playlist_start_index: int = 1  # &index=N from the original URL, 1-based
     last_playlist_has_more: bool = True
+    prewarm_task: asyncio.Task | None = None  # background resolve of queue[0]
 
 
 def fmt_duration(sec: int) -> str:
@@ -276,6 +277,7 @@ class PlaylistNextView(discord.ui.View):
             infos = await self.cog._extract(
                 self.url,
                 playlist=True,
+                flat=True,
                 playlist_start=p_start,
                 playlist_end=p_end,
             )
@@ -284,7 +286,7 @@ class PlaylistNextView(discord.ui.View):
             await inter.followup.send(f"❌ Failed fetching next batch: `{e}`", ephemeral=True)
             return
 
-        tracks = [t for t in (self.cog._to_track(d, inter.user) for d in infos) if t]
+        tracks = [t for t in (self.cog._to_track(d, inter.user, flat=True) for d in infos) if t]
         if not tracks:
             self.btn.disabled = True
             self.btn.label = "✅ End of playlist"
@@ -582,6 +584,9 @@ class Music(commands.Cog):
         st.last_playlist_page = 1
         st.last_playlist_start_index = 1
         st.last_playlist_has_more = True
+        if st.prewarm_task and not st.prewarm_task.done():
+            st.prewarm_task.cancel()
+        st.prewarm_task = None
         if st.leave_task and not st.leave_task.done():
             st.leave_task.cancel()
         st.leave_task = None
@@ -687,7 +692,11 @@ class Music(commands.Cog):
         )
 
     async def _refresh_stream(self, track: Track) -> str:
-        """Re-resolve a fresh stream URL (old ones expire). Falls back to cached."""
+        """Re-resolve a fresh stream URL (old ones expire). Falls back to cached.
+        Flat-listing placeholders (needs_resolve) deep-resolve here on their
+        first trip to the queue head."""
+        if await self._ensure_stream(track):
+            return track.stream_url
         if time.time() - track.resolved_at < 1800 and track.stream_url.startswith("http"):
             return track.stream_url  # just resolved (e.g. lazy pick resolve), reuse it
         try:
@@ -715,6 +724,32 @@ class Music(commands.Cog):
         except Exception as e:  # noqa: BLE001
             print(f"[extract] lazy resolve FAILED url={track.webpage_url!r} err={e}", flush=True)
         return False
+
+    def _prewarm_next(self, guild_id: int):
+        """Resolve queue[0] in the background while the current track plays, so
+        the next advance (or a single skip) doesn't pay the 3-5s deep resolve.
+        Superseded/replaced on every advance; safe to cancel."""
+        st = self.state(guild_id)
+        if st.prewarm_task and not st.prewarm_task.done():
+            st.prewarm_task.cancel()
+        st.prewarm_task = None
+        if not st.queue:
+            return
+        nxt = st.queue[0]
+        if not nxt.needs_resolve:
+            return
+
+        async def _go():
+            try:
+                # a skip may pop this track mid-resolve; resolve a copy-identity
+                # guard keeps us from stamping a URL onto a different track
+                await self._ensure_stream(nxt)
+                if st.queue and st.queue[0] is not nxt:
+                    pass  # track moved on; result harmless (needs_resolve=False now)
+            except asyncio.CancelledError:
+                pass
+
+        st.prewarm_task = self.bot.loop.create_task(_go())
 
     async def _heal_voice(self, guild: discord.Guild, channel) -> discord.VoiceClient | None:
         """Return a connected voice client, reconnecting zombies via channel.
@@ -817,6 +852,7 @@ class Music(commands.Cog):
         src = self._source(url, st.volume)
         st.started_at = time.time()
         st.paused = False
+        self._prewarm_next(guild.id)  # resolve queue[0] in background: skip stays warm
         _event(guild.id, f"now-playing title={nxt.title!r} by={nxt.requester} left={len(st.queue)} loop={st.loop_mode} force_skip={force}")
 
         def _after(err: Exception | None):
@@ -931,7 +967,8 @@ class Music(commands.Cog):
     async def _resolve_input(self, user: discord.abc.User, query: str) -> tuple[str, list[Track]]:
         """Smart router shared by /play and the panel Add box.
         Returns (kind, tracks). kind is 'playlist' | 'url' | 'search'.
-        - playlist link (has list=) -> playlist capped to first 25 (deep)
+        - playlist link (has list=) -> flat listing of first 25 (fast reply);
+          stream URLs lazy-resolved as each track reaches the queue head
         - video link -> single resolve (deep)
         - text -> flat listing top-5 for a fast pick list; stream URL
           lazy-resolved only after the user picks a number
@@ -940,12 +977,15 @@ class Music(commands.Cog):
         if "list=" in q and _is_url(q):
             # &index=N (YouTube's "start here" position) shifts the window:
             # fetch items N..N+24 instead of 1..25, and the Load-next button
-            # continues from N+25 onward.
+            # continues from N+25 onward. Flat listing (metadata only) keeps
+            # the reply fast (~5-8s vs ~130s deep); each track deep-resolves
+            # lazily via _refresh_stream/_ensure_stream when it reaches the
+            # queue head.
             start_index = _get_playlist_start_index(q)
             infos = await self._extract(
-                q, playlist=True, playlist_start=start_index, playlist_end=start_index + 24
+                q, playlist=True, flat=True, playlist_start=start_index, playlist_end=start_index + 24
             )
-            return ("playlist", [t for t in (self._to_track(d, user) for d in infos) if t])
+            return ("playlist", [t for t in (self._to_track(d, user, flat=True) for d in infos) if t])
         if _is_url(q):
             infos = await self._extract(q)
             return ("url", [t for t in (self._to_track(d, user) for d in infos[:1]) if t])
@@ -1199,13 +1239,13 @@ class Music(commands.Cog):
         try:
             start_index = _get_playlist_start_index(url)
             infos = await self._extract(
-                url, playlist=True, playlist_start=start_index, playlist_end=start_index + 24
+                url, playlist=True, flat=True, playlist_start=start_index, playlist_end=start_index + 24
             )
         except Exception as e:  # noqa: BLE001
             _event(inter.guild.id, f"playlist FAILED url={url!r} err={e}")  # type: ignore
             await inter.followup.send(f"❌ Playlist failed: `{e}`")
             return
-        tracks = [t for t in (self._to_track(d, inter.user) for d in infos) if t]
+        tracks = [t for t in (self._to_track(d, inter.user, flat=True) for d in infos) if t]
         if not tracks:
             await inter.followup.send("❌ No playable entries.")
             return

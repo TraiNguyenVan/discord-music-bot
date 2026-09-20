@@ -44,8 +44,11 @@ def get_ydl_opts(
     if os.path.exists(COOKIE_FILE):
         opts["cookiefile"] = COOKIE_FILE
     if playlist:
-        # full playlist capped at 25; flat listing keeps it fast
-        opts["extract_flat"] = "discard_in_playlist"
+        # "discard_in_playlist" deep-extracts every entry — only right for the
+        # deep path. When flat=True (playlist listing), keep extract_flat=True
+        # so entries come back metadata-only (~5-8s for 25 instead of ~130s).
+        if not flat:
+            opts["extract_flat"] = "discard_in_playlist"
         opts["playliststart"] = playlist_start
         opts["playlistend"] = playlist_end
         # playlists often contain dead/private entries — skip, don't fail all
