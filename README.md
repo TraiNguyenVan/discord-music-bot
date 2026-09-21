@@ -10,7 +10,9 @@ A resilient Discord music bot — slash commands + persistent panel, YouTube via
 
 ## Features
 
-- **Slash + panel:** `/music` opens a persistent control panel (Add / Pause / Skip / Stop / Shuffle / Loop / Vol / Queue / Refresh). Also `/play /search /playlist /queue /nowplaying /skip /pause /resume /stop /remove /clear /shuffle /loop /volume /join /leave`.
+- **Slash + panel:** `/music` opens a persistent control panel (Add / Pause / Skip / Stop / Shuffle / Loop / Vol / Queue / Autoplay / Refresh). Also `/play /search /playlist /queue /nowplaying /skip /pause /resume /stop /remove /clear /shuffle /loop /volume /autoplay /join /leave`.
+- **Autoplay ("Up next"):** when the queue runs low, the bot silently queries YouTube's radio mix (`list=RD<id>`) seeded from the playing track and tops up the queue so music never stops — the closest thing to YouTube in a browser. ON by default; toggle with `/autoplay` or the panel's `🔮 Autoplay` button.
+- **User steering:** manual picks (`/play`, search picker, panel ➕ Add) always slot **before** the autoplay tail so your pick plays next instead of being buried behind 25 recommendations. Skipped / removed / cleared tracks are remembered and never re-suggested.
 - **Fast search:** text → ranked top-5 picker (prefers official/short over mixes/lives) with lazy deep resolve; links/playlists resolve directly.
 - **Playlists with pagination:** fetches 25 tracks initially, with an interactive `📥 Load next 25` button on the message to load subsequent batches on demand without hitting YouTube IP bans.
 - **Stay-in-voice:** bot stays until explicit leave; 12h idle safety net only (`INACTIVITY_TIMEOUT`).
@@ -73,6 +75,7 @@ python bot.py
 | `/skip` | Skip one (debounced) |
 | `/pause` `/resume` `/stop` | Transport |
 | `/shuffle` `/loop` `/volume` `/remove` `/clear` | Queue mgmt |
+| `/autoplay [on|off]` | Toggle YouTube Up Next autoplay |
 | `/join` `/leave` `/help` `/about` | Voice + help |
 
 Panel is the intended UX — users rarely need to type slash commands.
