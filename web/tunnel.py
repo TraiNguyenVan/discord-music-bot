@@ -65,6 +65,34 @@ def _proc_ref():
     return _proc
 
 
+async def stop_tunnel() -> bool:
+    """Gracefully stop the running tunnel. Returns True if stopped, False if already stopped.
+
+    Thread-safe via _lock. Tunnel can be restarted later via ensure_tunnel().
+    """
+    global _proc, public_url
+    async with _lock:
+        if _proc is None or _proc.returncode is not None:
+            return False  # Already stopped
+        try:
+            _proc.terminate()  # SIGTERM first
+            await asyncio.wait_for(_proc.wait(), timeout=5.0)
+        except asyncio.TimeoutError:
+            print("[web] tunnel did not terminate, forcing kill", flush=True)
+            _proc.kill()
+            try:
+                await asyncio.wait_for(_proc.wait(), timeout=2.0)
+            except asyncio.TimeoutError:
+                pass  # Let OS reap it
+        except Exception as e:  # noqa: BLE001
+            print(f"[web] tunnel stop error: {e}", flush=True)
+        finally:
+            _proc = None
+            public_url = None
+        print("[web] tunnel stopped", flush=True)
+        return True
+
+
 async def ensure_tunnel(port: int, timeout: float = 40.0) -> str | None:
     """Start the quick tunnel if needed; return its public URL (or None).
 

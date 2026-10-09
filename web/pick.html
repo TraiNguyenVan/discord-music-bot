@@ -3,81 +3,213 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Music Bot — YouTube Picker</title>
+<meta name="theme-color" content="#0b0e0d">
+<link rel="preconnect" href="https://www.youtube.com">
+<link rel="preconnect" href="https://i.ytimg.com" crossorigin>
+<title>Music Bot — Listen Together</title>
 <style>
-  :root { color-scheme: dark; }
-  body { font-family: system-ui, sans-serif; background: #121216; color: #eee; margin: 0; padding: 16px; max-width: 720px; margin-inline: auto; }
-  h1 { font-size: 1.2rem; margin: 4px 0; }
-  .card { background: #1d1d24; border-radius: 12px; padding: 12px; margin: 12px 0; }
-  input[type=text] { width: 100%; box-sizing: border-box; padding: 10px; border-radius: 8px; border: 1px solid #444; background: #101014; color: #eee; }
-  .row { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
-  button { padding: 10px 14px; border-radius: 8px; border: 0; cursor: pointer; font-weight: 600; }
-  .primary { background: #5865F2; color: #fff; }
-  .good { background: #57F287; color: #06240f; }
-  .ghost { background: #2b2b35; color: #eee; }
-  button:disabled { opacity: .4; cursor: default; }
-  #player { width: 100%; aspect-ratio: 16/9; border-radius: 12px; overflow: hidden; background: #000; }
-  .meta { font-size: .9rem; color: #bbb; }
-  #status { white-space: pre-wrap; font-size: .9rem; }
-  #results { display: flex; flex-direction: column; gap: 8px; }
-  .yt-card { display: flex; gap: 10px; background: #24242e; border-radius: 10px; padding: 8px; cursor: pointer; align-items: center; }
-  .yt-card img { width: 128px; aspect-ratio: 16/9; object-fit: cover; border-radius: 6px; background: #000; flex-shrink: 0; }
-  .yt-info { flex: 1; min-width: 0; }
-  .yt-title { font-size: .9rem; font-weight: 600; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
-  .yt-sub { font-size: .8rem; color: #999; margin-top: 2px; }
-  .yt-add { flex-shrink: 0; padding: 8px 10px; }
-  .sticky-search { position: sticky; top: 0; z-index: 5; background: #121216; padding: 8px 0; }
-  .bar { height: 8px; background: #33333d; border-radius: 4px; overflow: hidden; margin-top: 6px; }
-  .bar-fill { height: 100%; background: #5865F2; width: 0%; }
-  .bot-title { font-size: .95rem; font-weight: 600; }
+  :root { color-scheme:dark; --bg:#090b0e; --surface:#11151a; --surface-raised:#171c22; --surface-hover:#202730; --line:#29313a; --line-strong:#3a4652; --text:#f4f6f8; --muted:#a6afb9; --quiet:#77818d; --accent:#d4fb74; --accent-ink:#17220a; --violet:#9277ff; --danger:#ff9d9d; --radius:16px; }
+  * { box-sizing:border-box; }
+  body { font-family:Inter,"Avenir Next",ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif; background:radial-gradient(900px 560px at 8% -10%,#26332b 0%,transparent 62%),radial-gradient(700px 520px at 100% 6%,#1c183a 0%,transparent 68%),var(--bg); color:var(--text); margin:0; min-height:100vh; padding:max(0px, env(safe-area-inset-top)) max(28px, env(safe-area-inset-right)) max(56px, env(safe-area-inset-bottom)) max(28px, env(safe-area-inset-left)); overflow-x:hidden; }
+  .shell { max-width:1440px; margin:auto; }
+  .masthead { height:78px; display:flex; justify-content:space-between; align-items:center; gap:24px; border-bottom:1px solid rgb(255 255 255 / .09); margin-bottom:32px; }
+  .brand { display:flex; align-items:center; gap:11px; min-width:0; }
+  .brand-mark { display:grid; place-items:center; width:36px; height:36px; border-radius:11px; color:var(--accent); background:linear-gradient(135deg,#313f25,#182017); box-shadow:inset 0 1px rgb(255 255 255 / .12); }
+  .brand-mark svg { width:20px; height:20px; }
+  .brand-name { font-weight:760; letter-spacing:-.04em; font-size:1.08rem; }
+  .mast-nav { display:flex; align-items:center; gap:7px; margin-left:22px; margin-right:auto; }
+  .mast-nav a { color:var(--muted); text-decoration:none; font-size:.86rem; padding:9px 12px; border-radius:9px; }
+  .mast-nav a:hover { color:var(--text); background:rgb(255 255 255 / .08); }
+  #ctx { text-align:right; max-width:42%; font-size:.76rem; }
+  .dashboard { display:grid; grid-template-columns:minmax(0,1fr) minmax(350px,420px); gap:40px; align-items:start; }
+  .discovery,.playback { min-width:0; display:flex; flex-direction:column; gap:30px; }
+  .playback { position:sticky; top:max(22px, env(safe-area-inset-top)); max-height:calc(100vh - 44px); overflow-y:auto; scrollbar-width:thin; scrollbar-color:#39443b transparent; padding-right:3px; }
+  .card { background:transparent; border:0; border-radius:0; padding:0; margin:0; box-shadow:none; }
+  .sticky-search { position:relative; isolation:isolate; overflow:hidden; padding:29px; border:1px solid #384335; border-radius:20px; background:linear-gradient(122deg,#263123,#171c1b 68%); box-shadow:0 22px 48px #0003, inset 0 1px rgb(255 255 255 / .07); }
+  .sticky-search::after { content:""; position:absolute; z-index:-1; width:250px; height:250px; right:-80px; top:-145px; border-radius:50%; background:repeating-radial-gradient(circle at center,transparent 0 13px,rgb(212 251 116 / .10) 14px 15px,transparent 16px 28px); opacity:.8; }
+  .card-head { display:flex; justify-content:space-between; align-items:flex-start; gap:16px; margin-bottom:15px; }
+  .card-head h2 { font-size:1.02rem; letter-spacing:-.025em; margin:0; text-wrap:balance; }
+  .section-kicker { color:var(--quiet); font-size:.78rem; margin-top:5px; line-height:1.45; }
+  input[type=text],input[type=url] { width:100%; min-width:0; min-height:50px; padding:12px 15px; border-radius:11px; border:1px solid #3a4540; background:#0b0e12; color:var(--text); font:inherit; box-shadow:inset 0 1px 2px #0005; }
+  input::placeholder { color:#879189; }
+  .row { display:flex; gap:9px; margin-top:10px; flex-wrap:wrap; }
+  button { min-height:42px; padding:10px 14px; border-radius:9px; border:1px solid transparent; cursor:pointer; font-family:inherit; font-weight:650; color:var(--text); transition:background-color .15s,border-color .15s,color .15s; touch-action:manipulation; -webkit-tap-highlight-color:transparent; }
+  button:active:not(:disabled) { transform:scale(.98); }
+  button:focus-visible,input:focus-visible,a:focus-visible { outline:2px solid var(--accent); outline-offset:3px; }
+  .primary { background:var(--accent); color:var(--accent-ink); box-shadow:0 8px 18px rgb(158 210 58 / .16); }
+  .primary:hover:not(:disabled) { background:#d4fa88; }
+  .good { background:var(--accent); color:var(--accent-ink); }
+  .ghost { background:#19211b; border-color:var(--line-strong); color:#e7eee7; }
+  .ghost:hover:not(:disabled) { background:#253128; border-color:#4d5d51; color:#fff; }
+  button:disabled { opacity:.42; cursor:not-allowed; transform:none; }
+  #player { width:100%; aspect-ratio:16/9; border-radius:12px; overflow:hidden; background:radial-gradient(circle at center,#232b2d 0 2%,#161b20 3% 10%,#0c0f12 11% 19%,#151a1f 20% 21%,#080a0c 22%); border:1px solid #303940; box-shadow:0 12px 28px #0006; }
+  .meta { font-size:.82rem; line-height:1.5; color:var(--muted); }
+  #status { white-space:pre-wrap; min-height:1.3em; margin-top:12px; }
+  #results,#addresults,#botqueue,#upnext { display:flex; flex-direction:column; gap:4px; }
+  .yt-card { display:flex; gap:14px; background:transparent; border-bottom:1px solid rgb(255 255 255 / .09); padding:12px 6px; align-items:center; transition:background-color .15s; content-visibility:auto; contain-intrinsic-size:88px; }
+  .yt-card:hover { background:rgb(255 255 255 / .075); }
+  .yt-preview { display:flex; align-items:center; gap:14px; flex:1; min-width:0; text-align:left; padding:0; border:0; min-height:0; background:transparent; }
+  .yt-preview:hover:not(:disabled) { background:transparent; }
+  .yt-preview:focus-visible { outline-offset:2px; border-radius:7px; }
+  .yt-card img { width:clamp(100px,17vw,148px); aspect-ratio:16/9; object-fit:cover; border-radius:7px; background:#080a0f; flex-shrink:0; }
+  .yt-info { flex:1; min-width:0; }
+  .yt-title { font-size:.9rem; font-weight:650; line-height:1.4; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
+  .yt-sub { font-size:.77rem; color:var(--muted); margin-top:4px; }
+  .yt-add { flex-shrink:0; padding:8px 12px; min-width:42px; }
+  .sticky-search { position:sticky; top:max(12px, env(safe-area-inset-top)); z-index:5; }
+  .searchwrap { position:relative; }
+  #sugg { position:absolute; left:0; right:0; top:calc(100% + 5px); background:#18211a; border:1px solid #39473b; border-radius:10px; overflow:hidden; display:none; z-index:10; box-shadow:0 14px 30px #0008; }
+  #sugg [role=option] { padding:11px 14px; cursor:pointer; font-size:.9rem; }
+  #sugg [role=option]:hover,#sugg [role=option]:focus { background:#2a382c; outline:2px solid var(--accent); outline-offset:-2px; }
+  .bar { height:4px; background:#303a32; border-radius:5px; overflow:hidden; margin-top:13px; }
+  .bar-fill { height:100%; background:var(--accent); width:0%; transition:width .35s linear; }
+  .bot-title { font-size:1rem; font-weight:700; line-height:1.45; overflow-wrap:anywhere; }
+  .lbl { font-size:.76rem; color:var(--muted); font-weight:700; margin-top:18px; margin-bottom:8px; }
+  input[type=range] { width:min(190px,45vw); accent-color:var(--accent); }
+  .volwrap { display:flex; align-items:center; gap:8px; margin-top:9px; flex-wrap:wrap; }
+  .qrow { display:flex; gap:10px; background:#14191f; border:1px solid #29323b; border-radius:11px; padding:10px; align-items:center; content-visibility:auto; contain-intrinsic-size:61px; }
+  .qrow .yt-info { flex:1; min-width:0; }
+  .rm { flex-shrink:0; padding:6px 10px; background:#2b1b1b; color:var(--danger); }
+  .pager { display:flex; gap:8px; align-items:center; justify-content:space-between; margin-top:12px; }
+  .bot-actions { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }
+  .bot-actions button { width:100%; padding-inline:8px; }
+  .player-note { margin-top:10px; }
+  .player-title { margin:15px 0 2px; font-size:1.14rem; font-weight:740; line-height:1.35; letter-spacing:-.03em; overflow-wrap:anywhere; }
+  .now-label { color:var(--accent); font-size:.72rem; font-weight:750; margin-bottom:10px; text-transform:uppercase; letter-spacing:.1em; }
+  #playercard { padding:18px; border-radius:18px; background:linear-gradient(145deg,#1a2025,#101419 72%); border:1px solid #303943; box-shadow:0 18px 38px #0004; }
+  #botcard,#addcard,#queuecard,#upnextcard { border-top:1px solid rgb(255 255 255 / .11); padding-top:22px; }
+  #botcard .card-head,#addcard .card-head,#queuecard .card-head,#upnextcard .card-head { margin-bottom:13px; }
+  .bot-actions button { font-size:.8rem; min-height:39px; }
+  #bottoggle { background:var(--accent); color:var(--accent-ink); }
+  .transport { display:grid; grid-template-columns:1.3fr 1fr 1fr; gap:8px; }
+  .transport button { min-width:0; padding-inline:8px; }
+  .search-heading { max-width:12ch; font-size:clamp(2rem,3vw,2.65rem); letter-spacing:-.06em; line-height:1.02; margin:0 0 11px; text-wrap:balance; }
+  .search-intro { color:var(--muted); margin:0 0 23px; font-size:.94rem; }
+  .section-title { display:flex; justify-content:space-between; align-items:baseline; gap:12px; margin:0 0 10px; }
+  .section-title h2 { font-size:1.16rem; margin:0; letter-spacing:-.03em; text-wrap:balance; }
+  .brand-dot { width:7px; height:7px; display:inline-block; vertical-align:middle; background:var(--accent); border-radius:50%; margin-right:7px; box-shadow:0 0 0 4px rgb(212 251 116 / .12); }
+  .empty { padding:12px 2px; }
+  .tnum { font-variant-numeric:tabular-nums; }
+  .scroll-top { position:fixed; right:max(20px, env(safe-area-inset-right)); bottom:max(20px, env(safe-area-inset-bottom)); z-index:25; display:inline-flex; align-items:center; justify-content:center; width:44px; height:44px; border-radius:50%; background:#19211b; border:1px solid var(--line-strong); color:var(--text); box-shadow:0 8px 24px #0008; transition:opacity .2s, transform .2s, background-color .15s; }
+  .scroll-top:hover:not(:disabled) { background:#253128; border-color:var(--accent); color:var(--accent); transform:translateY(-2px); }
+  .scroll-top svg { width:20px; height:20px; }
+  .sr-only { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0; }
+  .sr-only:focus { position:fixed; z-index:30; top:max(12px, env(safe-area-inset-top)); left:max(12px, env(safe-area-inset-left)); width:auto; height:auto; margin:0; clip:auto; padding:12px 16px; border-radius:8px; background:var(--accent); color:var(--accent-ink); }
+  @media (max-width:1000px) { body { padding-inline:max(22px, env(safe-area-inset-right)) max(22px, env(safe-area-inset-left)); } .dashboard { grid-template-columns:minmax(0,1fr) minmax(310px,360px); gap:24px; } }
+  @media (max-width:780px) { body { padding-inline:max(20px, env(safe-area-inset-right)) max(20px, env(safe-area-inset-left)); } .masthead { gap:12px; } .mast-nav { gap:0; margin-inline:0; } #ctx { max-width:33%; } .dashboard { grid-template-columns:minmax(0,1fr); gap:32px; } .playback { position:static; max-height:none; overflow:visible; display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); column-gap:25px; row-gap:24px; } #playercard,#botcard { grid-column:1/-1; } .discovery { gap:26px; } .sticky-search { position:static; } }
+  @media (max-width:560px) { body { padding:max(0px, env(safe-area-inset-top)) max(15px, env(safe-area-inset-right)) max(32px, env(safe-area-inset-bottom)) max(15px, env(safe-area-inset-left)); } .masthead { height:auto; min-height:64px; flex-wrap:wrap; gap:8px; margin-bottom:24px; padding:13px 0; } .brand-name { font-size:1rem; } .mast-nav { order:3; width:100%; margin:0; border-top:1px solid #202823; padding-top:7px; } .mast-nav a { flex:1; text-align:center; padding:8px 5px; } #ctx { max-width:50%; font-size:.68rem; line-height:1.35; } .dashboard,.discovery,.playback { gap:25px; } .playback { display:flex; } .sticky-search { padding:19px 16px; } .search-intro { font-size:.88rem; margin-bottom:18px; } .yt-card { gap:10px; padding:9px 2px; } .yt-card img { width:98px; } .yt-title { font-size:.84rem; } .yt-sub { font-size:.7rem; } .yt-add { padding:7px 9px; min-width:38px; } .row button { flex:1 1 auto; } .row input[type=text] { flex-basis:100%; } .bot-actions { grid-template-columns:repeat(2,minmax(0,1fr)); } .transport { grid-template-columns:1.2fr 1fr 1fr; } }
+  @media (max-width:380px) { body { padding-inline:max(12px, env(safe-area-inset-right)) max(12px, env(safe-area-inset-left)); } .yt-card img { width:78px; } .yt-title { font-size:.8rem; } button { padding-inline:9px; font-size:.8rem; } }
+  @media (prefers-reduced-motion:reduce) { *,*::before,*::after { scroll-behavior:auto!important; transition:none!important; animation:none!important; } }
 </style>
 </head>
 <body>
-<h1>🎧 YouTube Picker</h1>
-<div id="ctx" class="meta">Loading session…</div>
+<div class="shell">
+<a class="sr-only" href="#main">Skip to music</a>
+<header class="masthead"><div class="brand"><div class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M5 10v4M10 6v12M15 9v6M20 4v16"/></svg></div><span class="brand-name">Listen Together</span></div><nav class="mast-nav" aria-label="Page sections"><a href="#discover">Discover</a><a href="#playercard">Now playing</a><a href="#botcard">Queue</a></nav><div id="ctx" class="meta tnum" role="status" aria-live="polite">Loading session…</div></header>
+<main class="dashboard" id="main"><section class="discovery" id="discover" aria-label="Music discovery">
 
-<div class="card" id="botcard">
-  <div class="bot-title" id="botnow">🔊 Connecting to bot…</div>
-  <div class="bar"><div class="bar-fill" id="botbar"></div></div>
-  <div class="meta" id="bottime"></div>
-  <div class="row">
-    <button id="bottoggle" class="ghost">⏸ Pause</button>
-    <button id="botskip" class="ghost">⏭ Skip</button>
-  </div>
-</div>
-
-<div class="sticky-search">
-  <div class="card" style="margin:0">
-    <input id="q" type="text" placeholder="Search YouTube… e.g. artist - title" autocomplete="off">
-    <div class="row">
-      <button id="search" class="primary">🔎 Search</button>
+<div class="card sticky-search">
+  <h1 class="search-heading">Put on something good.</h1><p class="search-intro">Find a track, preview it, then bring everyone in.</p>
+  <form id="searchform">
+    <div class="searchwrap">
+      <label class="sr-only" for="q">Search YouTube videos</label>
+      <input id="q" name="search" type="text" placeholder="Search songs, artists, or albums…" autocomplete="off" spellcheck="false" role="combobox" aria-autocomplete="list" aria-controls="sugg" aria-expanded="false">
+      <div id="sugg" role="listbox" aria-label="Search suggestions"></div>
     </div>
-    <div id="count" class="meta"></div>
+    <div class="row"><button id="search" class="primary" type="submit">Search tracks</button><button id="addopen" class="ghost" type="button">Add by link</button></div>
+  </form>
+  <div id="count" class="meta tnum" role="status" aria-live="polite" style="margin-top:10px"></div>
+</div>
+<div class="card">
+  <div class="section-title"><h2>Search Results</h2><span class="meta">Preview or add to queue</span></div>
+  <div id="results" aria-live="polite"><div class="meta empty">Start with a search above. Your results will appear here.</div></div>
+</div>
+<section class="card" id="linkcard">
+  <div class="card-head"><div><h2>Preview a Link</h2><div class="section-kicker">Paste a YouTube URL or video ID.</div></div></div>
+  <form id="linkform">
+    <div class="row"><label class="sr-only" for="url">YouTube URL or video ID</label><input id="url" name="video" type="text" inputmode="url" autocomplete="url" spellcheck="false" placeholder="Paste a YouTube URL or video ID…"></div>
+    <div class="row"><button id="preview" class="ghost" type="submit">Preview link</button></div>
+  </form>
+</section>
+
+</section>
+<aside class="playback" aria-label="Playback and queue">
+<section class="card" id="playercard" aria-label="Preview player">
+  <div class="now-label"><span class="brand-dot"></span>Listening room</div>
+  <div id="player" title="YouTube track preview"></div>
+  <div id="now" class="player-title" aria-live="polite">Choose a track to preview</div>
+  <div class="row"><button id="queue" class="good" disabled>Add to queue</button><button id="pvunmute" class="ghost" aria-pressed="false">Preview muted</button></div>
+  <div class="meta player-note">Preview starts muted.</div>
+  <div id="status" class="meta" role="status" aria-live="polite" aria-atomic="true"></div>
+</section>
+<section class="card" id="botcard" aria-label="Bot playback controls">
+  <div class="card-head"><div><h2>Bot Playback</h2><div class="section-kicker">Control what’s playing in your voice channel.</div></div></div>
+  <div class="bot-title" id="botnow">Connecting to bot…</div>
+  <div class="bar"><div class="bar-fill" id="botbar"></div></div>
+  <div class="meta tnum" id="bottime"></div>
+  <div class="lbl">Transport</div>
+  <div class="transport">
+    <button id="bottoggle" class="ghost">Pause</button>
+    <button id="botskip" class="ghost">Skip</button>
+    <button id="botstop" class="ghost">Stop</button>
   </div>
+  <div class="lbl">Queue tools</div>
+  <div class="bot-actions">
+    <button id="botclear" class="ghost">Clear Queue</button>
+    <button id="botshuffle" class="ghost">Shuffle</button>
+    <button id="botplmore" class="ghost">Playlist +25</button>
+    <button id="botmixmore" class="ghost">Mix +25</button>
+  </div>
+  <div class="lbl">Loop &amp; autoplay</div>
+  <div class="bot-actions">
+    <button id="botloop" class="ghost">Loop: off</button>
+    <button id="botautoplay" class="ghost">Autoplay: ?</button>
+  </div>
+  <div class="lbl">Volume (bot)</div>
+  <div class="volwrap">
+    <button id="botvoldn" class="ghost" aria-label="Decrease bot volume">−</button>
+    <label class="sr-only" for="botvol">Bot volume</label><input id="botvol" name="bot-volume" type="range" min="0" max="200" value="50" autocomplete="off">
+    <button id="botvolup" class="ghost" aria-label="Increase bot volume">+</button>
+    <span class="meta tnum" id="botvolpct">50%</span>
+  </div>
+  <div class="lbl">Voice</div>
+  <div class="bot-actions">
+    <button id="botjoin" class="ghost">Join voice</button>
+    <button id="botleave" class="ghost">Leave voice</button>
+  </div>
+</section>
+
+<section class="card" id="addcard">
+  <div class="card-head"><div><h2>Add by Name or Link</h2><div class="section-kicker">Songs, YouTube links, and playlists use the bot’s smart resolver.</div></div></div>
+  <form id="addform">
+    <div class="row"><label class="sr-only" for="addq">Song name or YouTube link</label><input id="addq" name="add-query" type="text" autocomplete="off" spellcheck="false" placeholder="Song name, video link, or playlist link…"></div>
+    <div class="row"><button id="addgo" class="primary" type="submit">＋ &nbsp;Add to queue</button></div>
+  </form>
+  <div id="addresults" style="margin-top:10px" aria-live="polite"></div>
+</section>
+
+<section class="card" id="queuecard" style="display:none" aria-label="Bot queue">
+  <div class="card-head"><div><h2>Up Next</h2><div class="section-kicker">Tracks lined up for the bot.</div></div></div>
+  <div id="botqueue"></div>
+  <div class="pager">
+    <button id="qprev" class="ghost">‹ Prev</button>
+    <span class="meta tnum" id="qpageinfo"></span>
+    <button id="qnext" class="ghost">Next ›</button>
+  </div>
+</section>
+<section class="card" id="upnextcard" style="display:none" aria-label="YouTube recommendations">
+  <div class="card-head"><div><h2>Related Tracks</h2><div class="section-kicker">Recommendations based on your preview.</div></div></div>
+  <div id="upnext" style="display:flex;flex-direction:column;gap:8px;margin-top:8px"></div>
+</section>
+</aside>
+</main>
 </div>
 
-<div class="card">
-  <div id="results"><div class="meta">Type something and hit Search — results appear here. Tap any video to preview it below.</div></div>
-</div>
-
-<div class="card">
-  <div id="player"></div>
-  <div id="now" class="meta" style="margin-top:8px">No video loaded.</div>
-  <div class="row">
-    <button id="queue" class="good" disabled>➕ Queue on bot</button>
-  </div>
-  <div id="status" class="meta"></div>
-</div>
-
-<div class="card">
-  <div class="meta">…or paste a link / ID directly:</div>
-  <div class="row">
-    <input id="url" type="text" placeholder="https://youtu.be/… or 11-char ID">
-  </div>
-  <div class="row">
-    <button id="preview" class="ghost">▶ Preview link</button>
-  </div>
-</div>
+<button id="scrolltop" class="scroll-top" type="button" aria-label="Scroll to top" title="Scroll to top" hidden>
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <path d="M12 19V5M5 12l7-7 7 7"/>
+  </svg>
+</button>
 
 <script src="https://www.youtube.com/iframe_api"></script>
 <script>
@@ -102,15 +234,32 @@ function videoIdFromInput(s) {
   return m ? (m[1] || m[2] || m[3] || m[4]) : null;
 }
 
-// ---- player ----
+// ---- player (muted by default: preview must never fight bot audio) ----
 let player = null, playerReady = false;
+let previewMuted = true;
 let selected = null; // {videoId,title,uploader,duration,thumbnail} — what Queue sends
 window.onYouTubeIframeAPIReady = function () {
   player = new YT.Player("player", {
-    height: "100%", width: "100%", playerVars: { rel: 0 },
-    events: { onReady: () => { playerReady = true; }, onStateChange: syncFromPlayer },
+    height: "100%", width: "100%", playerVars: { rel: 0, mute: 1 },
+    events: { onReady: (e) => { playerReady = true; try { e.target.mute(); e.target.setVolume(0); } catch (_) {} refreshMuteBtn(); },
+              onStateChange: syncFromPlayer },
   });
 };
+function refreshMuteBtn() {
+  const b = $("pvunmute");
+  if (!b) return;
+  b.textContent = previewMuted ? "Preview muted · tap for sound" : "Preview sound on · tap to mute";
+  b.setAttribute("aria-label", previewMuted ? "Unmute preview" : "Mute preview");
+  b.setAttribute("aria-pressed", String(!previewMuted));
+}
+function applyPreviewMute() {
+  if (!player || !playerReady) return;
+  try {
+    if (previewMuted) { player.mute(); player.setVolume(0); }
+    else { player.unMute(); player.setVolume(80); }
+  } catch (e) {}
+  refreshMuteBtn();
+}
 function syncFromPlayer() {
   // user tapped something inside the embed itself (e.g. end-screen) — adopt it
   try {
@@ -129,13 +278,22 @@ setInterval(syncFromPlayer, 3000);
 
 function preview(meta) {
   selected = meta;
-  if (player && playerReady && player.loadVideoById) player.loadVideoById(meta.videoId);
+  if (player && playerReady && player.loadVideoById) {
+    player.loadVideoById(meta.videoId);
+    // re-assert mute: loadVideoById can reset it, and autoplay with
+    // sound is blocked by browsers anyway — muted autoplay always works.
+    if (previewMuted) {
+      try { player.mute(); player.setVolume(0); } catch (e) {}
+      setTimeout(() => { try { if (previewMuted) { player.mute(); } } catch (_) {} }, 600);
+    }
+  }
   refreshNow();
-  document.getElementById("player").scrollIntoView({ behavior: "smooth", block: "center" });
+  loadRelated(meta.videoId);
+  if (!window.matchMedia("(prefers-reduced-motion: reduce)").matches) document.getElementById("player").scrollIntoView({ behavior: "smooth", block: "center" });
 }
 function refreshNow() {
   if (selected) {
-    nowEl.textContent = "🎬 " + selected.title + " — " + selected.uploader + " (" + fmtDur(selected.duration) + ")";
+    nowEl.textContent = selected.title + " · " + selected.uploader + (selected.duration ? " · " + fmtDur(selected.duration) : "");
     $("queue").disabled = false;
   } else {
     nowEl.textContent = "No video loaded.";
@@ -193,7 +351,7 @@ async function doSearch() {
       else { countEl.textContent = "❌ " + ((j && j.error) || r.status); }
     } catch (e) { countEl.textContent = "❌ Search failed on all backends. Paste a link below instead."; }
   }
-  countEl.textContent = results.length ? results.length + " results (" + via + ") — tap to preview, ➕ to queue." : countEl.textContent;
+  countEl.textContent = results.length ? results.length + " results (" + via + ") — choose a track to preview or add it." : countEl.textContent;
   render(results);
   btn.disabled = false;
 }
@@ -203,38 +361,133 @@ function el(tag, cls, text) {
   if (text !== undefined) e.textContent = text;
   return e;
 }
-function render(results) {
-  resultsEl.innerHTML = "";
-  if (!results.length && !countEl.textContent.startsWith("❌")) {
-    resultsEl.appendChild(el("div", "meta", "No results. Try 'artist - title'."));
+function renderInto(container, results, emptyText) {
+  container.innerHTML = "";
+  if (!results.length) {
+    container.appendChild(el("div", "meta empty", emptyText));
     return;
   }
   for (const m of results) {
-    const card = el("div", "yt-card");
+    const card = el("article", "yt-card");
+    const open = el("button", "yt-preview");
+    open.type = "button";
     const img = document.createElement("img");
-    img.src = m.thumbnail; img.alt = ""; img.loading = "lazy";
+    img.src = m.thumbnail; img.alt = ""; img.width = 160; img.height = 90; img.loading = "lazy";
     const info = el("div", "yt-info");
     info.appendChild(el("div", "yt-title", m.title));
-    info.appendChild(el("div", "yt-sub", m.uploader + " • " + fmtDur(m.duration)));
-    const add = el("button", "yt-add good", "➕");
-    add.title = "Queue on bot";
-    add.onclick = (ev) => { ev.stopPropagation(); preview(m); queueSelected(); };
-    card.onclick = () => preview(m);
-    card.appendChild(img); card.appendChild(info); card.appendChild(add);
-    resultsEl.appendChild(card);
+    info.appendChild(el("div", "yt-sub", m.uploader + (m.duration ? " • " + fmtDur(m.duration) : "")));
+    const add = el("button", "yt-add good", "Add");
+    add.setAttribute("aria-label", "Add " + m.title + " to queue");
+    add.onclick = () => { selected = m; queueSelected(); };
+    open.setAttribute("aria-label", "Preview " + m.title);
+    open.onclick = () => preview(m);
+    open.appendChild(img); open.appendChild(info); card.appendChild(open); card.appendChild(add);
+    container.appendChild(card);
   }
 }
-$("search").onclick = doSearch;
-$("q").addEventListener("keydown", (e) => { if (e.key === "Enter") doSearch(); });
+function render(results) {
+  if (!results.length && !countEl.textContent.startsWith("❌")) {
+    resultsEl.innerHTML = "";
+    resultsEl.appendChild(el("div", "meta", "No results. Try 'artist - title'."));
+    return;
+  }
+  renderInto(resultsEl, results, "");
+}
 
-// ---- paste-a-link path ----
-$("preview").onclick = () => {
+// ---- form submit handlers ----
+$("searchform").addEventListener("submit", (e) => {
+  e.preventDefault();
+  hideSugg();
+  doSearch();
+});
+
+$("linkform").addEventListener("submit", (e) => {
+  e.preventDefault();
   const id = videoIdFromInput($("url").value);
   if (!id) { setStatus("❌ Could not find a video ID in that text."); return; }
   preview({ videoId: id, title: "YouTube video " + id, uploader: "?",
             duration: 0, thumbnail: "https://i.ytimg.com/vi/" + id + "/hqdefault.jpg" });
-  setStatus("Preview loaded — press ➕ Queue on bot to play it.");
-};
+  setStatus("Preview loaded. Add it to the queue when you're ready.");
+});
+
+$("addform").addEventListener("submit", (e) => {
+  e.preventDefault();
+  addQuery();
+});
+
+$("addopen").onclick = () => { $("addq").focus(); document.getElementById("addcard").scrollIntoView({ behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "center" }); };
+
+// ---- autocomplete (YouTube suggestions via bot) ----
+let suggTimer = null;
+function hideSugg() { $("sugg").style.display = "none"; $("sugg").innerHTML = ""; $("q").setAttribute("aria-expanded", "false"); }
+$("q").addEventListener("input", () => {
+  clearTimeout(suggTimer);
+  const q = $("q").value.trim();
+  if (q.length < 2) { hideSugg(); return; }
+  suggTimer = setTimeout(async () => {
+    try {
+      const r = await fetch("/api/suggest?q=" + encodeURIComponent(q));
+      const j = await r.json();
+      const box = $("sugg");
+      box.innerHTML = "";
+      if (!j || !j.ok || !j.suggestions || !j.suggestions.length) { hideSugg(); return; }
+      j.suggestions.forEach((s, i) => {
+        const d = document.createElement("div");
+        d.setAttribute("role", "option");
+        d.id = "suggestion-" + i;
+        d.tabIndex = 0;
+        d.textContent = s;
+        d.onclick = () => { $("q").value = s; hideSugg(); doSearch(); };
+        d.onkeydown = (ev) => {
+          if (ev.key === "Enter") { ev.preventDefault(); d.click(); }
+          if (ev.key === "ArrowDown" || ev.key === "ArrowUp") {
+            ev.preventDefault();
+            const options = [...box.querySelectorAll('[role="option"]')];
+            options[(options.indexOf(d) + (ev.key === "ArrowDown" ? 1 : options.length - 1)) % options.length].focus();
+          }
+        };
+        box.appendChild(d);
+      });
+      box.style.display = "block";
+      $("q").setAttribute("aria-expanded", "true");
+      $("q").setAttribute("aria-activedescendant", "suggestion-0");
+    } catch (e) {}
+  }, 250);
+});
+document.addEventListener("click", (e) => {
+  if (!e.target.closest(".searchwrap")) hideSugg();
+});
+
+// ---- recommendations: related on preview ----
+async function fetchStreamsDirect(videoId, ms) {
+  for (const h of SEARCH_HOSTS) {
+    const ctl = new AbortController();
+    const t = setTimeout(() => ctl.abort(), ms);
+    try {
+      const r = await fetch(h + "/streams/" + videoId, { signal: ctl.signal });
+      if (!r.ok) continue;
+      const rel = normItems((await r.json()).relatedStreams);
+      if (rel.length) return rel;
+    } catch (e) {} finally { clearTimeout(t); }
+  }
+  return [];
+}
+async function loadRelated(videoId) {
+  const box = $("upnext");
+  box.innerHTML = "";
+  $("upnextcard").style.display = "none";
+  let rel = await fetchStreamsDirect(videoId, 8000);
+  if (!rel.length) {
+    try {
+      const r = await fetch("/api/related?videoId=" + videoId);
+      const j = await r.json();
+      if (j && j.ok) rel = j.results || [];
+    } catch (e) {}
+  }
+  if (!rel.length) return;
+  renderInto(box, rel.slice(0, 10), "");
+  $("upnextcard").style.display = "block";
+}
 
 // ---- queue ----
 async function queueSelected() {
@@ -248,6 +501,8 @@ async function queueSelected() {
     });
     const j = await r.json();
     setStatus((j.ok ? "✅ " : "❌ ") + (j.message || j.error || r.status));
+    if (r.status === 403) setStatus("❌ This session link expired. Run /music mode:web in Discord for a fresh link.");
+    pollNow();
   } catch (e) { setStatus("❌ Network error: " + e); }
 }
 $("queue").onclick = queueSelected;
@@ -259,26 +514,42 @@ async function pollNow() {
   try {
     const r = await fetch("/api/now?token=" + encodeURIComponent(token));
     const j = await r.json();
-    if (!j || !j.ok) return;
+    if (!j || !j.ok) {
+      if (r.status === 403) setStatus("❌ This session link expired. Run /music mode:web in Discord for a fresh link.");
+      return;
+    }
     lastNow = j.now;
     renderBot(j.now);
   } catch (e) {}
 }
 function renderBot(n) {
   const titleEl = $("botnow"), barEl = $("botbar"), timeEl = $("bottime"), tgl = $("bottoggle");
+  renderQueuePage(n);
+  // loop / autoplay / volume labels mirror Discord panel state
+  const loop = (n && n.loop) || "off";
+  $("botloop").textContent = "Loop: " + loop;
+  $("botloop").setAttribute("aria-pressed", String(loop !== "off"));
+  const ap = n && typeof n.autoplay !== "undefined" ? n.autoplay : null;
+  $("botautoplay").textContent = "Autoplay: " + (ap === null ? "?" : (ap ? "On" : "Off"));
+  $("botautoplay").setAttribute("aria-pressed", String(ap === true));
+  const vol = (n && typeof n.volume !== "undefined") ? n.volume : 50;
+  if (document.activeElement !== $("botvol")) $("botvol").value = vol;
+  $("botvolpct").textContent = vol + " %";
   if (!n || !n.playing) {
-    titleEl.textContent = "🔊 Bot is idle — queue something below.";
+    titleEl.textContent = n && n.queue_len
+      ? "Idle · " + n.queue_len + " tracks queued. Skip to start."
+      : "Idle · add a track to get started.";
     barEl.style.width = "0%";
-    timeEl.textContent = "";
-    tgl.textContent = "⏸ Pause";
+    timeEl.textContent = (n && n.voice_channel ? "in " + n.voice_channel + " • " : "")
+      + "up next: " + ((n && n.queue_len) || 0) + " • loop " + loop + " • vol " + vol + " %";
+    tgl.textContent = "Pause";
     tgl.disabled = true;
-    $("botskip").disabled = true;
+    $("botskip").disabled = !(n && n.queue_len);
     return;
   }
   tgl.disabled = false;
   $("botskip").disabled = false;
-  const icon = n.paused ? "⏸" : "▶";
-  titleEl.textContent = icon + " " + n.title;
+  titleEl.textContent = (n.paused ? "Paused · " : "Playing · ") + n.title;
   const total = n.duration || 0;
   // while paused the bot freezes elapsed; between polls, advance locally if playing
   let el = n.elapsed || 0;
@@ -286,42 +557,207 @@ function renderBot(n) {
   if (total) {
     barEl.style.width = Math.min(100, el / total * 100) + "%";
     timeEl.textContent = fmtDur(el) + " / " + fmtDur(total) + " • up next: " + n.queue_len
-      + " • loop " + n.loop + " • vol " + n.volume + "%";
+      + " • loop " + n.loop + " • vol " + n.volume + " %";
   } else {
     barEl.style.width = "0%";
     timeEl.textContent = "🔴 LIVE • up next: " + n.queue_len;
   }
-  tgl.textContent = n.paused ? "▶ Resume" : "⏸ Pause";
+  tgl.textContent = n.paused ? "Resume" : "Pause";
   // stash ticking value so the bar moves smoothly between polls
   n.elapsed = el;
 }
-async function control(action) {
+function renderQueuePage(n) {
+  // cheap path: the /api/now snapshot already carries the first 10.
+  // full pages (with remove buttons) come from /api/queue below.
+  if (qpage !== 1) { loadQueuePage(qpage); return; }
+  const card = $("queuecard"), box = $("botqueue");
+  box.innerHTML = "";
+  const q = (n && n.queue) || [];
+  const total = (n && n.queue_len) || 0;
+  if (!total) { card.style.display = "none"; return; }
+  card.style.display = "block";
+  q.forEach((t, i) => {
+    box.appendChild(queueRow(i + 1, t.title, t.duration, t.requester));
+  });
+  if (total > q.length) {
+    box.appendChild(el("div", "meta", "…and " + (total - q.length) + " more — use Next › below."));
+  }
+  $("qpageinfo").textContent = "page 1" + (total > 10 ? " of ~" + Math.ceil(total / 10) : "");
+  $("qprev").disabled = true;
+  $("qnext").disabled = total <= 10;
+}
+function queueRow(index, title, duration, requester) {
+  const row = el("div", "qrow");
+  const info = el("div", "yt-info");
+  info.appendChild(el("div", "yt-title", index + ". " + title));
+  info.appendChild(el("div", "yt-sub", (requester || "?") + (duration ? " • " + fmtDur(duration) : "")));
+  const rm = el("button", "rm", "✕");
+  rm.title = "Remove #" + index;
+  rm.setAttribute("aria-label", "Remove " + title + " from queue");
+  rm.onclick = () => control("remove", { index });
+  row.appendChild(info);
+  row.appendChild(rm);
+  return row;
+}
+let qpage = 1;
+async function loadQueuePage(p) {
+  qpage = Math.max(1, p);
+  if (!token) return;
+  try {
+    const r = await fetch("/api/queue?token=" + encodeURIComponent(token) + "&page=" + qpage);
+    const j = await r.json();
+    if (!j || !j.ok) return;
+    qpage = j.page;
+    const card = $("queuecard"), box = $("botqueue");
+    box.innerHTML = "";
+    if (!j.total && !j.current) { card.style.display = "none"; return; }
+    card.style.display = "block";
+    if (j.current) {
+      box.appendChild(el("div", "meta", "Now: " + j.current.title));
+    }
+    for (const t of j.items) {
+      box.appendChild(queueRow(t.index, t.title, t.duration, t.requester));
+    }
+    if (!j.items.length) box.appendChild(el("div", "meta", "End of queue."));
+    $("qpageinfo").textContent = "page " + j.page + "/" + j.total_pages + " (" + j.total + " tracks)";
+    $("qprev").disabled = j.page <= 1;
+    $("qnext").disabled = j.page >= j.total_pages;
+  } catch (e) {}
+}
+async function control(action, params) {
   if (!token) return;
   try {
     const r = await fetch("/api/control", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ token, action }),
+      body: JSON.stringify({ token, action, ...(params || {}) }),
     });
     const j = await r.json();
-    if (!j.ok) setStatus("❌ " + (j.message || j.error || r.status));
+    if (!j.ok) {
+      setStatus("❌ " + (j.message || j.error || r.status));
+      if (r.status === 403) setStatus("❌ This session link expired. Run /music mode:web in Discord for a fresh link.");
+    } else if (j.message && ["loop", "loop_set", "autoplay", "autoplay_set", "volume_set", "volume_delta", "shuffle", "clear", "remove", "stop", "leave", "join", "pause", "resume", "playlist_more", "mix_more"].includes(action)) {
+      setStatus("✅ " + j.message);
+    }
+    if (j.now) { lastNow = j.now; renderBot(j.now); }
   } catch (e) { setStatus("❌ Network error: " + e); }
+  qpage = 1;
   pollNow();
 }
 $("bottoggle").onclick = () => control("toggle");
 $("botskip").onclick = () => control("skip");
+$("botstop").onclick = () => control("stop");
+let clearConfirmTimer = null;
+$("botclear").onclick = () => {
+  const button = $("botclear");
+  if (button.dataset.confirm !== "true") {
+    button.dataset.confirm = "true";
+    button.textContent = "Confirm Clear";
+    setStatus("Press Confirm Clear within 5 seconds to remove every queued track.");
+    clearTimeout(clearConfirmTimer);
+    clearConfirmTimer = setTimeout(() => {
+      button.dataset.confirm = "false";
+      button.textContent = "Clear Queue";
+    }, 5000);
+    return;
+  }
+  clearTimeout(clearConfirmTimer);
+  button.dataset.confirm = "false";
+  button.textContent = "Clear Queue";
+  control("clear");
+};
+$("botshuffle").onclick = () => control("shuffle");
+$("botplmore").onclick = () => control("playlist_more");
+$("botmixmore").onclick = () => control("mix_more");
+$("botloop").onclick = () => control("loop");
+$("botautoplay").onclick = () => control("autoplay");
+$("botvoldn").onclick = () => control("volume_delta", { delta: -10 });
+$("botvolup").onclick = () => control("volume_delta", { delta: 10 });
+let volTimer = null;
+$("botvol").addEventListener("change", () => {
+  clearTimeout(volTimer);
+  volTimer = setTimeout(() => control("volume_set", { level: parseInt($("botvol").value, 10) || 0 }), 150);
+});
+$("botjoin").onclick = () => control("join");
+$("botleave").onclick = () => control("leave");
+$("qprev").onclick = () => loadQueuePage(qpage - 1);
+$("qnext").onclick = () => loadQueuePage(qpage + 1);
+$("pvunmute").onclick = () => { previewMuted = !previewMuted; applyPreviewMute(); };
+refreshMuteBtn();
+
+// ---- long-page navigation ----
+const scrollTopButton = $("scrolltop");
+function updateScrollTopButton() {
+  scrollTopButton.hidden = window.scrollY < 400;
+}
+scrollTopButton.addEventListener("click", () => {
+  window.scrollTo({ top: 0, behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
+});
+window.addEventListener("scroll", updateScrollTopButton, { passive: true });
+updateScrollTopButton();
+
+// ---- Add box: same smart router as /play ----
+async function addQuery() {
+  const q = $("addq").value.trim();
+  if (!q) return;
+  if (!token) { setStatus("❌ Missing token. Re-run /music mode:web."); return; }
+  const box = $("addresults");
+  box.innerHTML = "";
+  setStatus("⏳ Resolving…");
+  try {
+    const r = await fetch("/api/play", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token, query: q }),
+    });
+    const j = await r.json();
+    setStatus(((j.ok ? "✅ " : "❌ ")) + (j.message || j.error || r.status));
+    if (j.ok && j.kind === "search" && j.results && j.results.length) {
+      for (const m of j.results) {
+        const meta = { videoId: m.videoId, title: m.title, uploader: m.uploader,
+                       duration: m.duration || 0,
+                       thumbnail: m.thumbnail || ("https://i.ytimg.com/vi/" + m.videoId + "/hqdefault.jpg") };
+        const card = el("article", "yt-card");
+        const open = el("button", "yt-preview");
+        open.type = "button";
+        const info = el("div", "yt-info");
+        info.appendChild(el("div", "yt-title", meta.title));
+        info.appendChild(el("div", "yt-sub", meta.uploader + (meta.duration ? " • " + fmtDur(meta.duration) : "")));
+        const add = el("button", "yt-add good", "Add");
+        add.setAttribute("aria-label", "Add " + meta.title + " to queue");
+        add.onclick = async (ev) => {
+          ev.stopPropagation();
+          setStatus("⏳ Sending to bot…");
+          try {
+            const rr = await fetch("/api/pick", {
+              method: "POST", headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ token, ...meta }),
+            });
+            const jj = await rr.json();
+            setStatus((jj.ok ? "✅ " : "❌ ") + (jj.message || jj.error || rr.status));
+            pollNow();
+          } catch (e) { setStatus("❌ Network error: " + e); }
+        };
+        open.setAttribute("aria-label", "Preview " + meta.title);
+        open.onclick = () => preview(meta);
+        open.appendChild(info); card.appendChild(open); card.appendChild(add);
+        box.appendChild(card);
+      }
+    }
+    $("addq").value = "";
+    pollNow();
+  } catch (e) { setStatus("❌ Network error: " + e); }
+}
 setInterval(pollNow, 2000);
 
 // ---- session header ----
 (async () => {
   if (!token) { ctxEl.textContent = "Missing ?token — run /music mode:web in Discord."; return; }
-  // autofocus search so it's one tap to start typing
-  $("q").focus();
   pollNow();
   try {
     const r = await fetch("/api/session?token=" + encodeURIComponent(token));
     const j = await r.json();
-    ctxEl.textContent = j.ok ? ("Server: " + j.guild + " • link for " + j.user + " • expires in " + j.expires_in + "s")
+    ctxEl.textContent = j.ok ? ("Server: " + j.guild + " • link for " + j.user + " • expires in " + j.expires_in + " s")
                              : ("❌ " + (j.error || r.status));
+    if (!j.ok) setStatus("❌ This session link is invalid or expired. Run /music mode:web in Discord for a fresh link.");
   } catch (e) { ctxEl.textContent = "❌ Cannot reach bot web server."; }
 })();
 </script>

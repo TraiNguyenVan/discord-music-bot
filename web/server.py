@@ -26,6 +26,7 @@ def _session_valid(cog, token: str):
     if time.time() > sess.get("expires_at", 0):
         cog.web_sessions.pop(token, None)
         return None
+    sess["last_heartbeat"] = time.time()
     return sess
 
 
@@ -90,10 +91,69 @@ def build_app(cog) -> web.Application:
         sess = _session_valid(cog, token)
         if not sess:
             return web.json_response({"ok": False, "error": "Link expired. Run /music mode:web again."}, status=403)
-        if action not in ("toggle", "skip"):
+        allowed = {"toggle", "pause", "resume", "skip", "stop", "leave", "clear",
+                   "shuffle", "loop", "loop_set", "volume_set", "volume_delta",
+                   "autoplay", "autoplay_set", "remove", "join",
+                   "playlist_more", "mix_more"}
+        if action not in allowed:
             return web.json_response({"ok": False, "error": "Unknown action."}, status=400)
-        ok, msg = await cog.web_control(sess["guild_id"], sess["user_id"], action)
-        return web.json_response({"ok": ok, "message": msg}, status=200 if ok else 400)
+        params = {k: v for k, v in data.items() if k not in ("token", "action")}
+        ok, msg = await cog.web_control(sess["guild_id"], sess["user_id"], action, params)
+        status = 200 if ok else 400
+        out: dict = {"ok": ok, "message": msg}
+        if ok and action in ("loop", "loop_set", "volume_set", "volume_delta", "autoplay", "autoplay_set"):
+            # piggyback fresh state so buttons relabel without an extra poll
+            try:
+                out["now"] = cog.web_now(sess["guild_id"])
+            except Exception:
+                pass
+        return web.json_response(out, status=status)
+
+    async def queue_page(req):
+        token = req.query.get("token", "")
+        sess = _session_valid(cog, token)
+        if not sess:
+            return web.json_response({"ok": False, "error": "Link expired."}, status=403)
+        try:
+            page = max(1, int(req.query.get("page", "1")))
+        except ValueError:
+            page = 1
+        return web.json_response({"ok": True, **cog.web_queue_page(sess["guild_id"], page)})
+
+    async def play_query(req):
+        try:
+            data = await req.json()
+        except Exception:
+            return web.json_response({"ok": False, "error": "Bad JSON."}, status=400)
+        token = str(data.get("token", ""))
+        query = str(data.get("query", "") or "")
+        sess = _session_valid(cog, token)
+        if not sess:
+            return web.json_response({"ok": False, "error": "Link expired. Run /music mode:web again."}, status=403)
+        if not query.strip():
+            return web.json_response({"ok": False, "error": "Empty query."}, status=400)
+        ok, msg, payload = await cog.web_play(sess["guild_id"], sess["user_id"], query)
+        return web.json_response({"ok": ok, "message": msg, **payload}, status=200 if ok else 400)
+
+    async def related(req):
+        import aiohttp as _aiohttp
+
+        from .search import server_related
+        vid = (req.query.get("videoId", "") or "").strip()
+        if not VIDEO_ID_RE.match(vid):
+            return web.json_response({"ok": False, "error": "Bad videoId."}, status=400)
+        async with _aiohttp.ClientSession() as session:
+            results, via = await server_related(vid, session)
+        return web.json_response({"ok": True, "results": results, "via": via})
+
+    async def suggest(req):
+        import aiohttp as _aiohttp
+
+        from .search import server_suggest
+        q = (req.query.get("q", "") or "").strip()
+        async with _aiohttp.ClientSession() as session:
+            out = await server_suggest(q, session)
+        return web.json_response({"ok": True, "suggestions": out})
 
     async def submit_pick(req):
         try:
@@ -126,7 +186,11 @@ def build_app(cog) -> web.Application:
     app.router.add_get("/api/config", search_config)
     app.router.add_get("/api/search", search_proxy)
     app.router.add_get("/api/now", now_state)
+    app.router.add_get("/api/related", related)
+    app.router.add_get("/api/suggest", suggest)
     app.router.add_post("/api/control", control)
+    app.router.add_get("/api/queue", queue_page)
+    app.router.add_post("/api/play", play_query)
     app.router.add_post("/api/pick", submit_pick)
     return app
 

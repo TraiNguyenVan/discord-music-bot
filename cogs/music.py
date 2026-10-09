@@ -172,15 +172,28 @@ def _event(guild_id: int | str, msg: str):
 
 
 def now_status(st: GuildState) -> dict:
-    """Sync snapshot for the web picker: pause state + frozen-while-paused elapsed."""
+    """Sync snapshot for the web picker: pause state + frozen-while-paused
+    elapsed + the actual queue list (always present, even when idle)."""
+    queue = [
+        {"title": t.title, "duration": t.duration, "requester": t.requester}
+        for t in st.queue[:10]
+    ]
+    base: dict = {
+        "playing": False,
+        "queue_len": len(st.queue),
+        "queue": queue,
+        "loop": st.loop_mode,
+        "volume": int(st.volume * 100),
+        "autoplay": st.autoplay,
+    }
     if st.current is None or not st.started_at:
-        return {"playing": False}
+        return base
     if st.paused and st.paused_at:
         elapsed = max(0.0, st.paused_at - st.started_at)
     else:
         elapsed = max(0.0, time.time() - st.started_at)
     t = st.current
-    return {
+    base.update({
         "playing": True,
         "title": t.title,
         "uploader": t.uploader,
@@ -190,11 +203,8 @@ def now_status(st: GuildState) -> dict:
         "requester": t.requester,
         "paused": st.paused,
         "elapsed": elapsed,
-        "queue_len": len(st.queue),
-        "loop": st.loop_mode,
-        "volume": int(st.volume * 100),
-        "autoplay": st.autoplay,
-    }
+    })
+    return base
 
 
 async def _safe_defer(inter: discord.Interaction, ephemeral: bool = False, retries: int = 1):
@@ -788,16 +798,84 @@ class Music(commands.Cog):
         self._search_lock = asyncio.Lock()  # global pacing: both guilds share one egress IP
         self._last_search_ts = 0.0
         self._search_min_gap = 3.0
-        self.web_sessions: dict[str, dict] = {}  # token -> {guild_id,user_id,user_name,channel_id,expires_at}
+        self.web_sessions: dict[str, dict] = {}  # token -> {guild_id,user_id,user_name,channel_id,expires_at,last_heartbeat}
         self.web_runner = None  # aiohttp AppRunner for the picker sidecar
         self.web_public_url: str | None = None  # cloudflared quick-tunnel URL, when live
+        self.web_heartbeat_timeout = float(os.getenv("WEB_HEARTBEAT_TIMEOUT", "90"))
+        self.tunnel_shutdown_delay = float(os.getenv("TUNNEL_SHUTDOWN_DELAY", "300"))
+        self.tunnel_shutdown_task: asyncio.Task | None = None
+        self.tunnel_monitor_task: asyncio.Task | None = None
 
     async def cog_load(self):
         try:
             from web.server import start_web_server
             self.bot.loop.create_task(start_web_server(self))
+            self.tunnel_monitor_task = self.bot.loop.create_task(self._monitor_tunnel_lifecycle())
         except Exception as e:  # noqa: BLE001 — picker is optional, bot works without it
             print(f"[web] picker disabled: {e}", flush=True)
+
+    def cog_unload(self):
+        if self.tunnel_monitor_task and not self.tunnel_monitor_task.done():
+            self.tunnel_monitor_task.cancel()
+        if self.tunnel_shutdown_task and not self.tunnel_shutdown_task.done():
+            self.tunnel_shutdown_task.cancel()
+        self.bot.loop.create_task(self._stop_tunnel_on_unload())
+
+    async def _stop_tunnel_on_unload(self):
+        try:
+            from web.tunnel import stop_tunnel
+            await stop_tunnel()
+        except Exception:
+            pass
+
+    def _has_active_web_sessions(self) -> bool:
+        """Return whether any unexpired picker session has a recent heartbeat."""
+        now = time.time()
+        for sess in self.web_sessions.values():
+            if now > sess.get("expires_at", 0):
+                continue
+            if now - sess.get("last_heartbeat", 0) < self.web_heartbeat_timeout:
+                return True
+        return False
+
+    async def _monitor_tunnel_lifecycle(self):
+        """Stop the global quick tunnel after its last browser user leaves."""
+        try:
+            while True:
+                await asyncio.sleep(10)
+                try:
+                    from web.tunnel import get_public_url
+                    tunnel_live = bool(get_public_url())
+                except Exception:
+                    tunnel_live = False
+                if not tunnel_live:
+                    continue
+                if self._has_active_web_sessions():
+                    if self.tunnel_shutdown_task and not self.tunnel_shutdown_task.done():
+                        self.tunnel_shutdown_task.cancel()
+                        self.tunnel_shutdown_task = None
+                        print("[web] active picker session reconnected; tunnel shutdown cancelled", flush=True)
+                elif self.tunnel_shutdown_task is None or self.tunnel_shutdown_task.done():
+                    print(
+                        f"[web] no active picker sessions; stopping tunnel in {self.tunnel_shutdown_delay:.0f}s",
+                        flush=True,
+                    )
+                    self.tunnel_shutdown_task = self.bot.loop.create_task(self._shutdown_tunnel_after_delay())
+        except asyncio.CancelledError:
+            pass
+
+    async def _shutdown_tunnel_after_delay(self):
+        try:
+            await asyncio.sleep(self.tunnel_shutdown_delay)
+            if self._has_active_web_sessions():
+                return
+            from web.tunnel import stop_tunnel
+            if await stop_tunnel():
+                self.web_public_url = None
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            print(f"[web] tunnel shutdown failed: {e}", flush=True)
 
     def web_base_url(self) -> str:
         """Base URL for picker links. Priority:
@@ -830,6 +908,7 @@ class Music(commands.Cog):
             "user_name": getattr(user, "display_name", str(user)),
             "channel_id": channel_id,
             "expires_at": time.time() + 900,  # 15 min link
+            "last_heartbeat": time.time(),
         }
         return token, f"{self.web_base_url()}/pick?token={token}"
 
@@ -908,31 +987,325 @@ class Music(commands.Cog):
 
     def web_now(self, guild_id: int) -> dict:
         """Sync snapshot for the picker page (pause state + timestamp)."""
-        return now_status(self.state(guild_id))
+        snap = now_status(self.state(guild_id))
+        try:
+            guild = self.bot.get_guild(guild_id)
+            vc = guild.voice_client if guild else None
+            snap["connected"] = bool(vc is not None and vc.is_connected())
+            snap["voice_channel"] = getattr(getattr(vc, "channel", None), "name", None)
+        except Exception:
+            snap["connected"] = False
+            snap["voice_channel"] = None
+        return snap
 
-    async def web_control(self, guild_id: int, user_id: int, action: str) -> tuple[bool, str]:
-        """Pause/resume/skip from the picker page. Same code paths as the buttons."""
+    async def _web_member(self, guild_id: int, user_id: int):
+        """(guild, member) lookup for web actions. Never raises."""
         guild = self.bot.get_guild(guild_id)
         if guild is None:
+            return None, None
+        member = guild.get_member(user_id)
+        if member is None:
+            try:
+                member = await guild.fetch_member(user_id)
+            except discord.HTTPException:
+                return guild, None
+        return guild, member
+
+    def _web_fallback_channel(self, guild, guild_id: int, user_id: int, member):
+        """Voice channel for web actions: live member.voice first, then the
+        channel stored when the picker link was opened."""
+        try:
+            vs = getattr(member, "voice", None)
+            if vs and vs.channel:
+                return vs.channel
+        except Exception:
+            pass
+        for sess in self.web_sessions.values():
+            if sess.get("guild_id") == guild_id and sess.get("user_id") == user_id and sess.get("channel_id"):
+                ch = guild.get_channel(sess["channel_id"])
+                if ch is not None:
+                    return ch
+        return None
+
+    async def web_control(self, guild_id: int, user_id: int, action: str, params: dict | None = None) -> tuple[bool, str]:
+        """Full bot control from the picker page. Same code paths as the
+        Discord buttons/slash commands. params carries action args
+        (level/delta/mode/index)."""
+        params = params or {}
+        guild, member = await self._web_member(guild_id, user_id)
+        if guild is None:
             return False, "Server gone."
+        st = self.state(guild_id)
+        vc = guild.voice_client
+
         if action == "toggle":
             msg = self._do_toggle(guild)
             ok = msg != "Nothing playing."
             await self._update_panel(guild_id)
             _event(guild_id, f"web-control toggle -> {msg} by={user_id}")
             return ok, msg
+        if action == "pause":
+            if vc and vc.is_playing():
+                self._set_paused(st, vc, True)
+                await self._update_panel(guild_id)
+                return True, "⏸ Paused."
+            return False, "Nothing playing."
+        if action == "resume":
+            if vc and vc.is_paused():
+                self._set_paused(st, vc, False)
+                await self._update_panel(guild_id)
+                return True, "▶ Resumed."
+            return False, "Nothing paused."
         if action == "skip":
-            member = guild.get_member(user_id)
             if member is None:
-                try:
-                    member = await guild.fetch_member(user_id)
-                except discord.HTTPException:
-                    return False, "User gone."
+                return False, "User gone."
             msg = await self._do_skip(guild, member)  # type: ignore
             await self._update_panel(guild_id)
             _event(guild_id, f"web-control skip -> {msg} by={member}")
             return True, msg
+        if action in ("stop", "leave"):
+            self._reset_state(st)
+            if vc:
+                await self._vc_disconnect(guild_id, vc)
+            await self._update_panel(guild_id)
+            _event(guild_id, f"web-control {action} by={user_id}")
+            return True, "⏹ Stopped and left." if action == "leave" else "⏹ Stopped."
+        if action == "clear":
+            for t in st.queue:
+                vid = _video_id(t.webpage_url)
+                if vid:
+                    st.played_ids.append(vid)
+            st.queue.clear()
+            await self._update_panel(guild_id)
+            _event(guild_id, f"web-control clear by={user_id}")
+            return True, "🧹 Queue cleared."
+        if action == "shuffle":
+            random.shuffle(st.queue)
+            for t in st.queue:
+                t.from_mix = False
+            await self._update_panel(guild_id)
+            return True, f"🔀 Shuffled {len(st.queue)} tracks."
+        if action == "loop":
+            msg = self._do_loop_cycle(guild)
+            await self._update_panel(guild_id)
+            return True, msg
+        if action == "loop_set":
+            mode = str(params.get("mode", "")).strip()
+            if mode not in ("off", "track", "queue"):
+                return False, "mode must be off/track/queue."
+            st.loop_mode = mode
+            await self._update_panel(guild_id)
+            return True, f"🔁 Loop: **{mode}**."
+        if action == "volume_set":
+            try:
+                level = max(0, min(200, int(params.get("level", 50))))
+            except (TypeError, ValueError):
+                return False, "level must be 0-200."
+            st.volume = level / 100
+            if vc and isinstance(vc.source, discord.PCMVolumeTransformer):
+                vc.source.volume = st.volume
+            await self._update_panel(guild_id)
+            return True, f"🔊 Volume: **{level}%**."
+        if action == "volume_delta":
+            try:
+                delta = int(params.get("delta", 10))
+            except (TypeError, ValueError):
+                return False, "delta must be a number."
+            return await self.web_control(guild_id, user_id, "volume_set", {"level": int(st.volume * 100) + delta})
+        if action == "autoplay":
+            st.autoplay = not st.autoplay
+            _event(guild_id, f"web-control autoplay to={st.autoplay} by={user_id}")
+            if st.autoplay:
+                self._maybe_trigger_autoplay(guild)
+            await self._update_panel(guild_id)
+            return True, f"🔮 Autoplay is now **{'ON' if st.autoplay else 'OFF'}**."
+        if action == "autoplay_set":
+            mode = str(params.get("mode", "")).strip().lower()
+            if mode not in ("on", "off"):
+                return False, "mode must be on/off."
+            st.autoplay = mode == "on"
+            if st.autoplay:
+                self._maybe_trigger_autoplay(guild)
+            await self._update_panel(guild_id)
+            return True, f"🔮 Autoplay is now **{'ON' if st.autoplay else 'OFF'}**."
+        if action == "remove":
+            try:
+                index = int(params.get("index", 0))
+            except (TypeError, ValueError):
+                return False, "index must be a number."
+            if 1 <= index <= len(st.queue):
+                t = st.queue.pop(index - 1)
+                vid = _video_id(t.webpage_url)
+                if vid:
+                    st.played_ids.append(vid)
+                await self._update_panel(guild_id)
+                return True, f"🗑 Removed **{t.title}**."
+            return False, "Invalid index."
+        if action == "join":
+            if member is None:
+                return False, "User gone."
+            channel = self._web_fallback_channel(guild, guild_id, user_id, member)
+            if channel is None:
+                return False, "Join a voice channel first, then retry."
+            healed = await self._heal_voice(guild, channel)
+            if healed is None:
+                return False, "⚠️ Could not join voice — try again."
+            if healed.channel != channel:
+                try:
+                    await healed.move_to(channel)
+                except Exception:
+                    return False, "⚠️ Could not move to your voice channel."
+            _event(guild_id, f"web-control join {channel.name} by={user_id}")
+            return True, f"Joined {channel.name}."
+        if action == "playlist_more":
+            return await self._web_playlist_more(guild, guild_id, user_id, member)
+        if action == "mix_more":
+            return await self._web_mix_more(guild, guild_id, user_id, member)
         return False, "Unknown action."
+
+    async def _web_playlist_more(self, guild, guild_id: int, user_id: int, member) -> tuple[bool, str]:
+        """Load the next 25 of the last playlist (mirrors PlaylistNextView)."""
+        st = self.state(guild_id)
+        url = st.last_playlist_url
+        if not url:
+            return False, "No playlist in progress."
+        next_page = st.last_playlist_page + 1
+        p_start = st.last_playlist_start_index + (next_page - 1) * 25
+        p_end = p_start + 24
+        try:
+            infos = await self._extract(url, playlist=True, flat=True,
+                                        playlist_start=p_start, playlist_end=p_end)
+        except Exception as e:  # noqa: BLE001
+            return False, f"❌ Failed fetching next batch: `{e}`"
+        tracks = [t for t in (self._to_track(d, member or self.bot.user, flat=True) for d in infos) if t]
+        if not tracks:
+            st.last_playlist_has_more = False
+            return False, "No more tracks in playlist."
+        channel = self._web_fallback_channel(guild, guild_id, user_id, member)
+        vc = await self._heal_voice(guild, channel)
+        if vc is None:
+            return False, "⚠️ Could not join voice — try again."
+        was_idle = not vc.is_playing() and not vc.is_paused() and st.current is None
+        st.queue.extend(tracks)
+        st.last_playlist_page = next_page
+        st.last_playlist_has_more = len(tracks) >= 25
+        if was_idle:
+            await self._play_next(guild)
+        await self._update_panel(guild_id)
+        _event(guild_id, f"web-playlist-more page={next_page} n={len(tracks)} by={user_id}")
+        return True, f"📃 Added **{len(tracks)} more tracks** (page {next_page})."
+
+    async def _web_mix_more(self, guild, guild_id: int, user_id: int, member) -> tuple[bool, str]:
+        """Queue 25 more from the current track's radio mix (mirrors QueueMixView)."""
+        st = self.state(guild_id)
+        seed = st.current
+        if seed is None:
+            return False, "Nothing playing to seed a mix from."
+        vid = _video_id(seed.webpage_url)
+        if not vid:
+            return False, "Current track has no video ID."
+        mix_url = f"https://www.youtube.com/watch?v={vid}&list=RD{vid}"
+        try:
+            infos = await self._extract(mix_url, playlist=True, flat=True,
+                                        playlist_start=1, playlist_end=25)
+        except Exception as e:  # noqa: BLE001
+            return False, f"❌ Failed fetching mix: `{e}`"
+        tracks = [t for t in (self._to_track(d, member or self.bot.user, flat=True) for d in infos) if t]
+        for t in tracks:
+            t.from_mix = True
+            t.requester = "🔮 Mix"
+        if not tracks:
+            return False, "No more tracks found in mix."
+        channel = self._web_fallback_channel(guild, guild_id, user_id, member)
+        vc = await self._heal_voice(guild, channel)
+        if vc is None:
+            return False, "⚠️ Could not join voice — try again."
+        st.queue.extend(tracks)
+        await self._update_panel(guild_id)
+        _event(guild_id, f"web-mix-more n={len(tracks)} seed={vid} by={user_id}")
+        return True, f"📃 Added **{len(tracks)} tracks** from mix."
+
+    def web_queue_page(self, guild_id: int, page: int = 1, per: int = 10) -> dict:
+        """Paginated queue for the web UI (mirrors /queue)."""
+        st = self.state(guild_id)
+        page = max(1, page)
+        start = (page - 1) * per
+        items = [
+            {"index": start + i + 1, "title": t.title, "duration": t.duration,
+             "requester": t.requester, "uploader": t.uploader}
+            for i, t in enumerate(st.queue[start:start + per])
+        ]
+        total_pages = max(1, math.ceil(len(st.queue) / per)) if st.queue else 1
+        cur = None
+        if st.current:
+            cur = {"title": st.current.title, "duration": st.current.duration,
+                   "requester": st.current.requester, "uploader": st.current.uploader}
+        return {"current": cur, "items": items, "page": page,
+                "total_pages": total_pages, "total": len(st.queue)}
+
+    async def web_play(self, guild_id: int, user_id: int, query: str) -> tuple[bool, str, dict]:
+        """Add by text/URL/playlist from the web Add box. Mirrors /play's
+        smart router. Search kind returns a pick list (no auto-queue);
+        everything else queues directly. Returns (ok, msg, payload)."""
+        guild, member = await self._web_member(guild_id, user_id)
+        if guild is None:
+            return False, "Server gone.", {}
+        requester = member or self.bot.user
+        q = (query or "").strip()
+        if not q:
+            return False, "Empty — type something.", {}
+        try:
+            kind, tracks = await self._resolve_input(requester, q)
+        except Exception as e:  # noqa: BLE001
+            return False, f"❌ Could not resolve that: `{e}`", {}
+        if not tracks:
+            return False, "❌ No playable results.", {}
+        if kind == "search":
+            payload = {"kind": kind, "results": [
+                {"videoId": _video_id(t.webpage_url) or "",
+                 "title": t.title, "uploader": t.uploader, "duration": t.duration,
+                 "thumbnail": t.thumbnail or ""}
+                for t in tracks if _video_id(t.webpage_url)
+            ]}
+            return True, f"🔎 Top {len(payload['results'])} matches — tap ➕ to queue.", payload
+        st = self.state(guild_id)
+        channel = self._web_fallback_channel(guild, guild_id, user_id, member)
+        vc = await self._heal_voice(guild, channel)
+        if vc is None:
+            return False, "⚠️ Could not join voice — join one and retry.", {"kind": kind}
+        if kind == "playlist":
+            was_idle = not vc.is_playing() and not vc.is_paused() and st.current is None
+            st.queue.extend(tracks)
+            st.last_playlist_url = q
+            st.last_playlist_page = 1
+            st.last_playlist_start_index = _get_playlist_start_index(q)
+            st.last_playlist_has_more = len(tracks) >= 25
+            if was_idle:
+                await self._play_next(guild)
+            await self._update_panel(guild_id)
+            return True, f"📃 Queued playlist: **{len(tracks)} tracks**.", {"kind": kind, "count": len(tracks)}
+        if kind == "radio_mix_single":
+            single = tracks[0]
+            was_idle = not vc.is_playing() and not vc.is_paused() and st.current is None
+            self._insert_manual_track(st, single)
+            if was_idle:
+                await self._play_next(guild)
+                msg = f"▶ **{single.title}** — use Mix+ to queue the rest."
+            else:
+                msg = f"➕ Queued **{single.title}** — use Mix+ to queue the rest."
+            await self._update_panel(guild_id)
+            return True, msg, {"kind": kind}
+        # single url
+        track = tracks[0]
+        was_idle = not vc.is_playing() and not vc.is_paused() and st.current is None
+        self._insert_manual_track(st, track)
+        if was_idle:
+            await self._play_next(guild)
+            msg = f"▶ Started **{track.title}**."
+        else:
+            msg = f"➕ Queued **{track.title}** — #{len(st.queue)}."
+        await self._update_panel(guild_id)
+        return True, msg, {"kind": kind}
 
     async def _search_gate(self):
         """Enforce ≥3s between YouTube search/listing extractions globally.

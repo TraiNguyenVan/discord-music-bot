@@ -87,3 +87,54 @@ async def server_search(query: str, session) -> tuple[list[dict], str]:
         except Exception:
             continue
     return [], ""
+
+
+async def server_related(video_id: str, session) -> tuple[list[dict], str]:
+    """YouTube's recommendation graph via /streams/{id}.relatedStreams."""
+    import re as _re
+    import aiohttp as _aiohttp
+
+    if not _re.match(r"^[A-Za-z0-9_-]{11}$", video_id or ""):
+        return [], ""
+    for base in instances():
+        try:
+            async with session.get(
+                f"{base}/streams/{video_id}",
+                timeout=_aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                if resp.status != 200:
+                    continue
+                data = await resp.json()
+                results = normalize(data.get("relatedStreams") if isinstance(data, dict) else [])
+                if results:
+                    return results, base
+        except Exception:
+            continue
+    return [], ""
+
+
+async def server_suggest(query: str, session) -> list[str]:
+    """Autocomplete via YouTube's suggest API (JSONP parsed server-side)."""
+    import json as _json
+
+    import aiohttp as _aiohttp
+
+    q = (query or "").strip()
+    if not q:
+        return []
+    try:
+        async with session.get(
+            "https://suggestqueries.google.com/complete/search",
+            params={"client": "youtube", "ds": "yt", "q": q},
+            timeout=_aiohttp.ClientTimeout(total=6),
+        ) as resp:
+            if resp.status != 200:
+                return []
+            body = (await resp.text()).strip()
+        prefix = "window.google.ac.h("
+        if not body.startswith(prefix) or not body.endswith(")"):
+            return []
+        data = _json.loads(body[len(prefix):-1])
+        return [str(s[0]) for s in (data[1] if len(data) > 1 else []) if s][:8]
+    except Exception:
+        return []
