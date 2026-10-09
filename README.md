@@ -11,8 +11,8 @@ A resilient Discord music bot — slash commands + persistent panel, YouTube via
 ## Features
 
 - **Slash + panel:** `/music` opens a persistent control panel (Add / Pause / Skip / Stop / Shuffle / Loop / Vol / Queue / Autoplay / Refresh). Also `/play /search /playlist /queue /nowplaying /skip /pause /resume /stop /remove /clear /shuffle /loop /volume /autoplay /join /leave`.
-- **Autoplay ("Up next"):** when the queue runs low, the bot silently queries YouTube's radio mix (`list=RD<id>`) seeded from the playing track and tops up the queue so music never stops — the closest thing to YouTube in a browser. ON by default; toggle with `/autoplay` or the panel's `🔮 Autoplay` button.
-- **User steering:** manual picks (`/play`, search picker, panel ➕ Add) always slot **before** the autoplay tail so your pick plays next instead of being buried behind 25 recommendations. Skipped / removed / cleared tracks are remembered and never re-suggested.
+- **Autoplay ("Up next"):** a small, fresh buffer instead of one giant stale tail — the bot keeps ~8 mix tracks queued (deduped, capped, never re-suggesting played/skipped/removed tracks) and re-seeds every fill from the freshest taste signal: your latest pick first, then the playing track. Failed fetches retry on a 30→60→120s ladder, a drained bot resumes by itself, and the panel shows live status (`finding…` / `retrying…` / `ran dry`) so autoplay is never silently dead. ON by default; toggle with `/autoplay` or the panel's `🔮 Autoplay` button.
+- **User steering (structural):** the queue is two segments — your picks and the autoplay buffer — and yours always plays first: singles, playlists, picker adds, everything. Shuffle keeps the segments apart, `loop=queue` cycles your picks without stranding them behind autoplay, `loop=track` suspends autoplay entirely, and skipped / removed / cleared tracks are never re-suggested.
 - **Browser picker (panel 🌐 Picker button):** the panel hands you a link to a page containing in-page YouTube search + a real embedded player with synced pause/timestamp. Zero-config public link via Cloudflare quick tunnel — links live while in use, the tunnel idles out after `TUNNEL_SHUTDOWN_DELAY` and restarts on demand at the next tap; search load stays off the bot's IP.
 - **Fast search:** text → ranked top-5 picker (prefers official/short over mixes/lives) with lazy deep resolve; links/playlists resolve directly.
 - **Playlists with pagination:** fetches 25 tracks initially, with an interactive `📥 Load next 25` button on the message to load subsequent batches on demand without hitting YouTube IP bans.
@@ -107,7 +107,7 @@ Examples:
 
 ```
 [usage] /search query=tình đầu | guild=... user=...
-[event] guild=... now-playing title='...' by=... left=3 loop=queue force_skip=False
+[event] guild=... now-playing title='...' by=... user=2 auto=8 loop=queue force_skip=False
 [extract] flat=True n=10 took=2.8s query='...'
 [throttle] pacing search +1.2s
 [music] stream FAILED guild=... elapsed=12s streak=1

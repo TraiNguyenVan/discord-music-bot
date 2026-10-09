@@ -55,7 +55,7 @@ def build_app(cog) -> web.Application:
             "ok": True,
             "guild": guild.name if guild else str(sess["guild_id"]),
             "user": sess.get("user_name", ""),
-            "queue_len": len(cog.state(sess["guild_id"]).queue),
+            "queue_len": cog.state(sess["guild_id"]).qtotal,
             # null → no fixed expiry; the page hides the countdown
             "expires_in": None,
         })
@@ -123,7 +123,7 @@ def build_app(cog) -> web.Application:
             return web.json_response({"ok": False, "error": "Link expired. Run /music mode:web again."}, status=403)
         allowed = {"toggle", "pause", "resume", "skip", "stop", "leave", "clear",
                    "shuffle", "loop", "loop_set", "volume_set", "volume_delta",
-                   "autoplay", "autoplay_set", "remove", "join",
+                   "autoplay", "autoplay_set", "remove", "jump", "join",
                    "playlist_more", "mix_more"}
         if action not in allowed:
             return web.json_response({"ok": False, "error": "Unknown action."}, status=400)
@@ -131,7 +131,8 @@ def build_app(cog) -> web.Application:
         ok, msg = await cog.web_control(sess["guild_id"], sess["user_id"], action, params)
         status = 200 if ok else 400
         out: dict = {"ok": ok, "message": msg}
-        if ok and action in ("loop", "loop_set", "volume_set", "volume_delta", "autoplay", "autoplay_set"):
+        if ok and action in ("loop", "loop_set", "volume_set", "volume_delta",
+                             "autoplay", "autoplay_set", "jump"):
             # piggyback fresh state so buttons relabel without an extra poll
             try:
                 out["now"] = cog.web_now(sess["guild_id"])

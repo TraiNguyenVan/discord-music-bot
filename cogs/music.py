@@ -15,12 +15,20 @@ from discord.ext import commands
 
 from .youtube import FFMPEG_BEFORE, FFMPEG_OPTIONS, get_ydl_opts
 
-# Autoplay ("Up next") tuning — top up the queue from a radio mix when it runs
-# low, so music never stops and recommendations come from YouTube's graph.
-MIX_TOPUP_AT = 3           # trigger top-up when queue length < this after an advance
-MIX_BATCH = 25             # tracks to pull per mix fetch (matches the page size)
-PLAYED_CAP = 300           # rolling session history size (deque maxlen)
-MIX_FAIL_BACKOFF = 60.0    # seconds to back off after a failed mix fetch
+# Autoplay ("Up next") engine — a small, fresh autoplay buffer instead of one
+# giant stale tail. Every fill is seeded from the latest taste signal (the
+# last user pick first, then the playing/last-played track), so the queue
+# adapts to what the room actually listens to.
+MIX_BATCH = 25              # mix listing page size (one request either way)
+AUTO_BUFFER_TARGET = 8      # keep ~this many autoplay tracks buffered
+AUTO_TOPUP_AT = 3           # top up when the auto segment drops below this
+AUTO_MAX = 16               # hard cap on the auto segment (mix-button floods)
+USER_SEED_WINDOW = 1800.0   # a user pick steers autoplay seeding for 30 minutes
+AUTO_RETRY_DELAYS = (30.0, 60.0, 120.0)  # ladder after failed fetches (capped)
+AUTO_DRY_RETRY_DELAY = 45.0 # a dry seed rotates to the next candidate after this
+MIX_CACHE_TTL = 1800.0      # cached mix listings live 30 minutes
+MIX_CACHE_MAX = 32          # seeds kept in the mix cache
+PLAYED_CAP = 300            # rolling session history size (deque maxlen)
 
 
 @dataclass
@@ -119,8 +127,13 @@ def _rank_search(query: str, datas: list[dict]) -> list[dict]:
 
 @dataclass
 class GuildState:
-    queue: list[Track] = field(default_factory=list)
+    # Two-segment queue: user intent always outranks the autoplay buffer.
+    # Pop order is user_queue first, then auto_queue — steering is structural,
+    # so playlists, shuffles and loops can no longer bury user picks.
+    user_queue: list[Track] = field(default_factory=list)
+    auto_queue: list[Track] = field(default_factory=list)
     current: Track | None = None
+    last_played: Track | None = None  # survives /stop: autoplay bootstraps from it when toggled ON while idle
     loop_mode: str = "off"  # off | track | queue
     volume: float = 0.5  # 0.0 - 2.0
     started_at: float = 0.0
@@ -140,15 +153,33 @@ class GuildState:
     last_playlist_page: int = 1
     last_playlist_start_index: int = 1  # &index=N from the original URL, 1-based
     last_playlist_has_more: bool = True
-    prewarm_task: asyncio.Task | None = None  # background resolve of queue[0]
+    prewarm_task: asyncio.Task | None = None  # background resolve of the queue head
     autoplay: bool = True  # YouTube "Up next" radio mix — ON by default
     played_ids: collections.deque = field(default_factory=lambda: collections.deque(maxlen=PLAYED_CAP))
-    mix_task: asyncio.Task | None = None  # in-flight autoplay top-up
-    mix_seed_id: str | None = None
-    mix_dry: bool = False  # last fetch for this seed yielded 0 new tracks
-    mix_fail_until: float = 0.0  # backoff timestamp after a failed fetch
+    mix_task: asyncio.Task | None = None  # in-flight autoplay fill
+    auto_retry_task: asyncio.Task | None = None  # scheduled retry (fetch failure / dry-seed rotation)
+    auto_retries: int = 0  # consecutive failed mix fetches (drives the retry ladder)
+    auto_status: str = "ok"  # ok | finding | retrying | dry — surfaced on the panel
+    dry_seeds: set[str] = field(default_factory=set)  # seeds whose mix yielded nothing new
+    user_seed_id: str | None = None  # the latest user pick steers autoplay seeding…
+    user_seed_title: str = ""        # …(kept for logs/panel)…
+    user_seed_at: float = 0.0        # …while fresh (USER_SEED_WINDOW)
     mix_session_id: int = 0  # incremented on _reset_state to invalidate in-flight fetches
-    autoplay_loading: bool = False  # panel shows "🔮 finding up next…" during a drain-wait
+
+    @property
+    def qtotal(self) -> int:
+        return len(self.user_queue) + len(self.auto_queue)
+
+    def pop_head(self) -> Track | None:
+        """Next track overall: user intent first, autoplay buffer second."""
+        if self.user_queue:
+            return self.user_queue.pop(0)
+        if self.auto_queue:
+            return self.auto_queue.pop(0)
+        return None
+
+    def peek_head(self) -> Track | None:
+        return self.user_queue[0] if self.user_queue else (self.auto_queue[0] if self.auto_queue else None)
 
 
 def fmt_duration(sec: int) -> str:
@@ -167,6 +198,19 @@ def progress_bar(elapsed: float, total: int, width: int = 15) -> str:
     return "▬" * filled + "🔘" + "▬" * (width - filled)
 
 
+def autoplay_label(st: GuildState) -> str:
+    """Human-readable autoplay state for embeds — no invisible dead ends:
+    ON/OFF plus the live engine status (finding / retrying / ran dry)."""
+    if not st.autoplay:
+        return "OFF"
+    return {
+        "ok": "ON",
+        "finding": "ON — finding…",
+        "retrying": "ON — retrying…",
+        "dry": "ON — ran dry",
+    }.get(st.auto_status, "ON")
+
+
 def _event(guild_id: int | str, msg: str):
     print(f"[event] guild={guild_id} {msg}", flush=True)
 
@@ -176,15 +220,18 @@ def now_status(st: GuildState) -> dict:
     elapsed + the actual queue list (always present, even when idle)."""
     queue = [
         {"title": t.title, "duration": t.duration, "requester": t.requester}
-        for t in st.queue[:10]
+        for t in (*st.user_queue, *st.auto_queue)[:10]
     ]
     base: dict = {
         "playing": False,
-        "queue_len": len(st.queue),
+        "queue_len": st.qtotal,
+        "user_len": len(st.user_queue),
+        "auto_len": len(st.auto_queue),
         "queue": queue,
         "loop": st.loop_mode,
         "volume": int(st.volume * 100),
         "autoplay": st.autoplay,
+        "auto_status": st.auto_status if st.autoplay else "off",
     }
     if st.current is None or not st.started_at:
         return base
@@ -387,7 +434,8 @@ class PlaylistNextView(discord.ui.View):
             return
 
         was_idle = not vc.is_playing() and not vc.is_paused() and st.current is None
-        st.queue.extend(tracks)
+        self.cog._extend_user_tracks(st, tracks)  # user intent: lands ahead of the autoplay buffer
+        self.cog._autoplay_check(inter.guild.id, "playlist-more")  # type: ignore
         st.last_playlist_url = self.url
         st.last_playlist_page = next_page
         self.current_page = next_page
@@ -467,22 +515,19 @@ class QueueMixView(discord.ui.View):
             return
 
         st = self.cog.state(self.guild_id)
-        _event(self.guild_id, f"queuemix-fetch url={self.mix_url!r} by={inter.user}")
+        seed = _video_id(self.mix_url)
+        _event(self.guild_id, f"queuemix-fetch seed={seed} by={inter.user}")
 
         try:
-            infos = await self.cog._extract(
-                self.mix_url,
-                playlist=True,
-                flat=True,
-                playlist_start=1,
-                playlist_end=25,
-            )
+            entries = await self.cog._get_mix_entries(seed) if seed else []
         except Exception as e:  # noqa: BLE001
             _event(self.guild_id, f"queuemix FAILED err={e}")
             await inter.followup.send(f"❌ Failed fetching mix: `{e}`", ephemeral=True)
             return
 
-        tracks = [t for t in (self.cog._to_track(d, inter.user, flat=True) for d in infos) if t]
+        # shared autoplay filter: the seed itself + already-queued/played
+        # tracks never re-enter the queue from a mix path (dupes fixed)
+        tracks = self.cog._filter_auto_candidates(st, entries, seed)
         if not tracks:
             self.btn.disabled = True
             self.btn.label = "✅ End of mix"
@@ -501,9 +546,9 @@ class QueueMixView(discord.ui.View):
 
         was_idle = not vc.is_playing() and not vc.is_paused() and st.current is None
         for track in tracks:
-            track.from_mix = True
             track.requester = "🔮 Mix"
-        st.queue.extend(tracks)
+        self.cog._extend_auto_tracks(st, tracks)
+        self.cog._autoplay_check(self.guild_id, "mix-button")
 
         if len(tracks) < 25:
             self.btn.disabled = True
@@ -589,7 +634,8 @@ class AddSongModal(discord.ui.Modal, title="Add music"):
         st = self.cog.state(inter.guild.id)  # type: ignore
         if kind == "playlist":
             was_idle = not vc.is_playing() and not vc.is_paused() and st.current is None
-            st.queue.extend(tracks)
+            self.cog._extend_user_tracks(st, tracks)
+            self.cog._autoplay_check(inter.guild.id, "panel-playlist")  # type: ignore
             st.last_playlist_url = q
             st.last_playlist_page = 1
             st.last_playlist_start_index = _get_playlist_start_index(q)
@@ -611,7 +657,8 @@ class AddSongModal(discord.ui.Modal, title="Add music"):
         elif kind == "radio_mix_single":
             single = tracks[0]
             was_idle = not vc.is_playing() and not vc.is_paused() and st.current is None
-            self.cog._insert_manual_track(st, single)
+            self.cog._add_user_track(st, single)
+            self.cog._autoplay_check(inter.guild.id, "panel-mix-single")  # type: ignore
             vid = _video_id(single.webpage_url)
             mix_url = f"https://www.youtube.com/watch?v={vid}&list=RD{vid}" if vid else q
             view = QueueMixView(self.cog, inter.guild.id, mix_url)  # type: ignore
@@ -711,11 +758,9 @@ class MusicPanelView(discord.ui.View):
         if not await self._ack(inter):
             return
         st = self.cog.state(inter.guild.id)  # type: ignore
-        random.shuffle(st.queue)
-        for t in st.queue:
-            t.from_mix = False  # shuffle claims ownership: no autoplay tail to steer past
+        n = self.cog._do_shuffle(st)
         await self.cog._update_panel(inter.guild.id)  # type: ignore
-        await inter.followup.send(f"🔀 Shuffled {len(st.queue)} tracks.", ephemeral=True)
+        await inter.followup.send(f"🔀 Shuffled {n} tracks.", ephemeral=True)
 
     @discord.ui.button(label="🔁 Loop", style=discord.ButtonStyle.secondary, custom_id="music:loop", row=1)
     async def loop(self, inter: discord.Interaction, _btn: discord.ui.Button):
@@ -751,10 +796,11 @@ class MusicPanelView(discord.ui.View):
         lines = []
         if st.current:
             lines.append(f"**Now:** {st.current.title} (`{fmt_duration(st.current.duration)}`)")
-        for i, t in enumerate(st.queue[:10], start=1):
+        tracks = [*st.user_queue, *st.auto_queue]
+        for i, t in enumerate(tracks[:10], start=1):
             lines.append(f"`{i}.` {t.title} (`{fmt_duration(t.duration)}`) — {t.requester}")
-        if len(st.queue) > 10:
-            lines.append(f"…and {len(st.queue) - 10} more (use `/queue` for pages)")
+        if len(tracks) > 10:
+            lines.append(f"…and {len(tracks) - 10} more (use `/queue` for pages)")
         em = discord.Embed(title="📜 Queue", description="\n".join(lines) or "Queue is empty.",
                             colour=discord.Colour.blurple())
         await inter.followup.send(embed=em, ephemeral=True)
@@ -764,10 +810,7 @@ class MusicPanelView(discord.ui.View):
         if not await self._ack(inter):
             return
         st = self.cog.state(inter.guild.id)  # type: ignore
-        st.autoplay = not st.autoplay
-        _event(inter.guild.id, f"autoplay toggled to={st.autoplay} by={inter.user}")  # type: ignore
-        if st.autoplay:
-            self.cog._maybe_trigger_autoplay(inter.guild)  # type: ignore
+        self.cog._set_autoplay(inter.guild.id, not st.autoplay, by=str(inter.user))  # type: ignore
         await self.cog._update_panel(inter.guild.id)  # type: ignore
         await inter.followup.send(
             f"🔮 Autoplay is now **{'ON' if st.autoplay else 'OFF'}**.", ephemeral=True
@@ -798,6 +841,9 @@ class Music(commands.Cog):
         self._search_lock = asyncio.Lock()  # global pacing: both guilds share one egress IP
         self._last_search_ts = 0.0
         self._search_min_gap = 3.0
+        # Radio-mix listings cached per seed (TTL): re-seeds, dry re-checks and
+        # retries after /clear reuse the listing instead of refetching it.
+        self._mix_cache: dict[str, tuple[float, list[dict]]] = {}
         self.web_sessions: dict[str, dict] = {}  # token -> {guild_id,user_id,user_name,channel_id,last_heartbeat} — no fixed expiry
         self.web_runner = None  # aiohttp AppRunner for the picker sidecar
         self.web_public_url: str | None = None  # cloudflared quick-tunnel URL, when live
@@ -1028,13 +1074,14 @@ class Music(commands.Cog):
         )
         st = self.state(guild_id)
         was_idle = not vc.is_playing() and not vc.is_paused() and st.current is None
-        self._insert_manual_track(st, track)
+        self._add_user_track(st, track)
+        self._autoplay_check(guild_id, "web-pick")
         _event(guild_id, f"web-pick title={title!r} vid={vid} by={member} idle={was_idle}")
         if was_idle:
             await self._play_next(guild)
             msg = f"▶ Started **{title}** (picked in browser)."
         else:
-            msg = f"➕ Queued **{title}** (picked in browser) — #{len(st.queue)}."
+            msg = f"➕ Queued **{title}** (picked in browser) — #{len(st.user_queue)}."
         await self._update_panel(guild_id)
         return True, msg
 
@@ -1134,20 +1181,15 @@ class Music(commands.Cog):
             _event(guild_id, f"web-control {action} by={user_id}")
             return True, "⏹ Stopped and left." if action == "leave" else "⏹ Stopped."
         if action == "clear":
-            for t in st.queue:
-                vid = _video_id(t.webpage_url)
-                if vid:
-                    st.played_ids.append(vid)
-            st.queue.clear()
+            self._clear_queues(st)
+            self._autoplay_check(guild_id, "web-clear")
             await self._update_panel(guild_id)
             _event(guild_id, f"web-control clear by={user_id}")
             return True, "🧹 Queue cleared."
         if action == "shuffle":
-            random.shuffle(st.queue)
-            for t in st.queue:
-                t.from_mix = False
+            n = self._do_shuffle(st)
             await self._update_panel(guild_id)
-            return True, f"🔀 Shuffled {len(st.queue)} tracks."
+            return True, f"🔀 Shuffled {n} tracks."
         if action == "loop":
             msg = self._do_loop_cycle(guild)
             await self._update_panel(guild_id)
@@ -1176,19 +1218,14 @@ class Music(commands.Cog):
                 return False, "delta must be a number."
             return await self.web_control(guild_id, user_id, "volume_set", {"level": int(st.volume * 100) + delta})
         if action == "autoplay":
-            st.autoplay = not st.autoplay
-            _event(guild_id, f"web-control autoplay to={st.autoplay} by={user_id}")
-            if st.autoplay:
-                self._maybe_trigger_autoplay(guild)
+            self._set_autoplay(guild_id, not st.autoplay, by=str(user_id))
             await self._update_panel(guild_id)
             return True, f"🔮 Autoplay is now **{'ON' if st.autoplay else 'OFF'}**."
         if action == "autoplay_set":
             mode = str(params.get("mode", "")).strip().lower()
             if mode not in ("on", "off"):
                 return False, "mode must be on/off."
-            st.autoplay = mode == "on"
-            if st.autoplay:
-                self._maybe_trigger_autoplay(guild)
+            self._set_autoplay(guild_id, mode == "on", by=str(user_id))
             await self._update_panel(guild_id)
             return True, f"🔮 Autoplay is now **{'ON' if st.autoplay else 'OFF'}**."
         if action == "remove":
@@ -1196,14 +1233,15 @@ class Music(commands.Cog):
                 index = int(params.get("index", 0))
             except (TypeError, ValueError):
                 return False, "index must be a number."
-            if 1 <= index <= len(st.queue):
-                t = st.queue.pop(index - 1)
-                vid = _video_id(t.webpage_url)
-                if vid:
-                    st.played_ids.append(vid)
-                await self._update_panel(guild_id)
-                return True, f"🗑 Removed **{t.title}**."
-            return False, "Invalid index."
+            t = self._remove_at(st, index)
+            if t is None:
+                return False, "Invalid index."
+            vid = _video_id(t.webpage_url)
+            if vid:
+                st.played_ids.append(vid)
+            self._autoplay_check(guild_id, "web-remove")
+            await self._update_panel(guild_id)
+            return True, f"🗑 Removed **{t.title}**."
         if action == "jump":
             # play a queued track right now: move it to the head and skip.
             # Reuses _do_skip so debounce/voice-heal/loop semantics stay identical.
@@ -1213,10 +1251,12 @@ class Music(commands.Cog):
                 index = int(params.get("index", 0))
             except (TypeError, ValueError):
                 return False, "index must be a number."
-            if not (1 <= index <= len(st.queue)):
+            track = self._remove_at(st, index)
+            if track is None:
                 return False, "Invalid index."
-            track = st.queue.pop(index - 1)
-            st.queue.insert(0, track)
+            track.from_mix = False  # an explicit jump is user intent now
+            st.user_queue.insert(0, track)
+            self._note_user_seed(st, track)
             msg = await self._do_skip(guild, member)  # type: ignore
             await self._update_panel(guild_id)
             _event(guild_id, f"web-control jump index={index} title={track.title!r} -> {msg} by={user_id}")
@@ -1268,7 +1308,8 @@ class Music(commands.Cog):
         if vc is None:
             return False, "⚠️ Could not join voice — try again."
         was_idle = not vc.is_playing() and not vc.is_paused() and st.current is None
-        st.queue.extend(tracks)
+        self._extend_user_tracks(st, tracks)
+        self._autoplay_check(guild_id, "web-playlist-more")
         st.last_playlist_page = next_page
         st.last_playlist_has_more = len(tracks) >= 25
         if was_idle:
@@ -1286,44 +1327,44 @@ class Music(commands.Cog):
         vid = _video_id(seed.webpage_url)
         if not vid:
             return False, "Current track has no video ID."
-        mix_url = f"https://www.youtube.com/watch?v={vid}&list=RD{vid}"
         try:
-            infos = await self._extract(mix_url, playlist=True, flat=True,
-                                        playlist_start=1, playlist_end=25)
+            entries = await self._get_mix_entries(vid)
         except Exception as e:  # noqa: BLE001
             return False, f"❌ Failed fetching mix: `{e}`"
-        tracks = [t for t in (self._to_track(d, member or self.bot.user, flat=True) for d in infos) if t]
-        for t in tracks:
-            t.from_mix = True
-            t.requester = "🔮 Mix"
+        tracks = self._filter_auto_candidates(st, entries, vid)
         if not tracks:
             return False, "No more tracks found in mix."
         channel = self._web_fallback_channel(guild, guild_id, user_id, member)
         vc = await self._heal_voice(guild, channel)
         if vc is None:
             return False, "⚠️ Could not join voice — try again."
-        st.queue.extend(tracks)
+        for t in tracks:
+            t.requester = "🔮 Mix"
+        self._extend_auto_tracks(st, tracks)
+        self._autoplay_check(guild_id, "web-mix-more")
         await self._update_panel(guild_id)
         _event(guild_id, f"web-mix-more n={len(tracks)} seed={vid} by={user_id}")
         return True, f"📃 Added **{len(tracks)} tracks** from mix."
 
     def web_queue_page(self, guild_id: int, page: int = 1, per: int = 10) -> dict:
-        """Paginated queue for the web UI (mirrors /queue)."""
+        """Paginated queue for the web UI (mirrors /queue). Combined view:
+        user segment first, then the autoplay buffer — matches pop order."""
         st = self.state(guild_id)
         page = max(1, page)
         start = (page - 1) * per
+        tracks = [*st.user_queue, *st.auto_queue]
         items = [
             {"index": start + i + 1, "title": t.title, "duration": t.duration,
-             "requester": t.requester, "uploader": t.uploader}
-            for i, t in enumerate(st.queue[start:start + per])
+             "requester": t.requester, "uploader": t.uploader, "from_auto": t.from_mix}
+            for i, t in enumerate(tracks[start:start + per])
         ]
-        total_pages = max(1, math.ceil(len(st.queue) / per)) if st.queue else 1
+        total_pages = max(1, math.ceil(len(tracks) / per)) if tracks else 1
         cur = None
         if st.current:
             cur = {"title": st.current.title, "duration": st.current.duration,
                    "requester": st.current.requester, "uploader": st.current.uploader}
         return {"current": cur, "items": items, "page": page,
-                "total_pages": total_pages, "total": len(st.queue)}
+                "total_pages": total_pages, "total": len(tracks)}
 
     async def web_play(self, guild_id: int, user_id: int, query: str) -> tuple[bool, str, dict]:
         """Add by text/URL/playlist from the web Add box. Mirrors /play's
@@ -1357,7 +1398,8 @@ class Music(commands.Cog):
             return False, "⚠️ Could not join voice — join one and retry.", {"kind": kind}
         if kind == "playlist":
             was_idle = not vc.is_playing() and not vc.is_paused() and st.current is None
-            st.queue.extend(tracks)
+            self._extend_user_tracks(st, tracks)
+            self._autoplay_check(guild_id, "web-playlist")
             st.last_playlist_url = q
             st.last_playlist_page = 1
             st.last_playlist_start_index = _get_playlist_start_index(q)
@@ -1369,7 +1411,8 @@ class Music(commands.Cog):
         if kind == "radio_mix_single":
             single = tracks[0]
             was_idle = not vc.is_playing() and not vc.is_paused() and st.current is None
-            self._insert_manual_track(st, single)
+            self._add_user_track(st, single)
+            self._autoplay_check(guild_id, "web-mix-single")
             if was_idle:
                 await self._play_next(guild)
                 msg = f"▶ **{single.title}** — use Mix+ to queue the rest."
@@ -1380,12 +1423,13 @@ class Music(commands.Cog):
         # single url
         track = tracks[0]
         was_idle = not vc.is_playing() and not vc.is_paused() and st.current is None
-        self._insert_manual_track(st, track)
+        self._add_user_track(st, track)
+        self._autoplay_check(guild_id, "web-play")
         if was_idle:
             await self._play_next(guild)
             msg = f"▶ Started **{track.title}**."
         else:
-            msg = f"➕ Queued **{track.title}** — #{len(st.queue)}."
+            msg = f"➕ Queued **{track.title}** — #{len(st.user_queue)}."
         await self._update_panel(guild_id)
         return True, msg, {"kind": kind}
 
@@ -1408,7 +1452,8 @@ class Music(commands.Cog):
 
     def _reset_state(self, st: GuildState):
         """Full wipe for explicit leave/stop: queue, current, pause flag, idle timer."""
-        st.queue.clear()
+        st.user_queue.clear()
+        st.auto_queue.clear()
         st.current = None
         st.paused = False
         st.paused_at = 0.0
@@ -1420,18 +1465,25 @@ class Music(commands.Cog):
         st.last_playlist_page = 1
         st.last_playlist_start_index = 1
         st.last_playlist_has_more = True
-        st.mix_seed_id = None
-        st.mix_dry = False
-        st.mix_fail_until = 0.0
+        st.auto_status = "ok"
+        st.auto_retries = 0
+        st.dry_seeds.clear()
+        st.user_seed_id = None
+        st.user_seed_title = ""
+        st.user_seed_at = 0.0
         st.mix_session_id += 1
-        st.autoplay_loading = False
         st.played_ids.clear()
+        # NOTE: st.last_played survives a reset on purpose — /autoplay ON
+        # while idle bootstraps the next mix from it.
         if st.prewarm_task and not st.prewarm_task.done():
             st.prewarm_task.cancel()
         st.prewarm_task = None
         if st.mix_task and not st.mix_task.done():
             st.mix_task.cancel()
         st.mix_task = None
+        if st.auto_retry_task and not st.auto_retry_task.done():
+            st.auto_retry_task.cancel()
+        st.auto_retry_task = None
         if st.leave_task and not st.leave_task.done():
             st.leave_task.cancel()
         st.leave_task = None
@@ -1578,9 +1630,9 @@ class Music(commands.Cog):
         if st.prewarm_task and not st.prewarm_task.done():
             st.prewarm_task.cancel()
         st.prewarm_task = None
-        if not st.queue:
+        nxt = st.peek_head()
+        if nxt is None:
             return
-        nxt = st.queue[0]
         if not nxt.needs_resolve:
             return
 
@@ -1589,127 +1641,275 @@ class Music(commands.Cog):
                 # a skip may pop this track mid-resolve; resolve a copy-identity
                 # guard keeps us from stamping a URL onto a different track
                 await self._ensure_stream(nxt)
-                if st.queue and st.queue[0] is not nxt:
+                if st.peek_head() is not nxt:
                     pass  # track moved on; result harmless (needs_resolve=False now)
             except asyncio.CancelledError:
                 pass
 
         st.prewarm_task = self.bot.loop.create_task(_go())
 
-    def _insert_manual_track(self, st: GuildState, track: Track):
-        """Insert a user-chosen track before the first autoplay mix track, or append.
+    # ---------- queue mutation helpers (single choke points) ----------
 
-        Manual adds always outrank the mix tail so a user's pick plays next
-        instead of being buried behind ~25 recommendations.
-        """
-        for idx, t in enumerate(st.queue):
-            if t.from_mix:
-                st.queue.insert(idx, track)
-                return
-        st.queue.append(track)
+    def _add_user_track(self, st: GuildState, track: Track):
+        """User picks land in the user segment — always ahead of autoplay."""
+        st.user_queue.append(track)
+        self._note_user_seed(st, track)
 
-    def _maybe_trigger_autoplay(self, guild: discord.Guild, seed_track: Track | None = None):
-        """Spawn a mix top-up if autoplay is on and the queue is running low."""
-        st = self.state(guild.id)
-        if not st.autoplay:
+    def _extend_user_tracks(self, st: GuildState, tracks: list[Track]):
+        """Playlists are user intent too: they land ahead of the autoplay
+        buffer instead of being buried behind it."""
+        if not tracks:
             return
-        if len(st.queue) >= MIX_TOPUP_AT:
-            return
-        seed = seed_track or st.current
-        if seed is None:
-            return
-        seed_id = _video_id(seed.webpage_url)
-        if not seed_id:
-            return
-        if seed_id == st.mix_seed_id and st.mix_dry:
-            return
-        if time.time() < st.mix_fail_until:
-            return
-        if st.mix_task and not st.mix_task.done():
-            return
-        st.mix_task = self.bot.loop.create_task(
-            self._autoplay_fill(guild, seed_id, seed.title)
-        )
+        st.user_queue.extend(tracks)
+        self._note_user_seed(st, tracks[0])  # the playlist's opener represents the batch
 
-    async def _autoplay_fill(self, guild: discord.Guild, seed_id: str, seed_title: str):
-        """Fetch YouTube's radio mix for `seed_id` and append survivors to the queue.
+    def _note_user_seed(self, st: GuildState, track: Track):
+        """The latest user pick steers autoplay seeding while fresh."""
+        vid = _video_id(track.webpage_url)
+        if vid:
+            st.user_seed_id = vid
+            st.user_seed_title = track.title
+            st.user_seed_at = time.time()
 
-        Never blocks the voice-thread after-chain: this is a background task.
-        Session-id + autoplay-flag re-check after the fetch so a Stop mid-flight
-        cannot resurrect tracks into a wiped session.
-        """
-        st = self.state(guild.id)
-        session_id = st.mix_session_id
-        mix_url = f"https://www.youtube.com/watch?v={seed_id}&list=RD{seed_id}"
-        was_empty = st.current is None and not st.queue
-        if was_empty:
-            st.autoplay_loading = True
-            await self._update_panel(guild.id)
+    def _do_shuffle(self, st: GuildState) -> int:
+        """Shuffle each segment separately — user intent still pops first."""
+        random.shuffle(st.user_queue)
+        random.shuffle(st.auto_queue)
+        return len(st.user_queue) + len(st.auto_queue)
 
-        try:
-            _event(guild.id, f"autoplay-fetch seed={seed_id} title={seed_title[:40]!r}")
-            infos = await self._extract(
-                mix_url,
-                playlist=True,
-                flat=True,
-                playlist_start=1,
-                playlist_end=MIX_BATCH,
-            )
-        except asyncio.CancelledError:
-            st.autoplay_loading = False
-            raise
-        except Exception as e:  # noqa: BLE001
-            _event(guild.id, f"autoplay-fetch FAILED err={e}")
-            st.mix_fail_until = time.time() + MIX_FAIL_BACKOFF
-            st.autoplay_loading = False
-            await self._update_panel(guild.id)
-            return
+    def _remove_at(self, st: GuildState, index: int) -> Track | None:
+        """1-based index over the combined view (user segment first, then
+        the autoplay buffer) — matches what /queue and the panel show."""
+        if index < 1 or index > st.qtotal:
+            return None
+        if index <= len(st.user_queue):
+            return st.user_queue.pop(index - 1)
+        return st.auto_queue.pop(index - len(st.user_queue) - 1)
 
-        # Guard: session reset or autoplay flipped off during the fetch
-        if st.mix_session_id != session_id or not st.autoplay:
-            st.autoplay_loading = False
-            return
-
-        existing_ids: set[str] = set()
-        for t in st.queue:
+    def _clear_queues(self, st: GuildState):
+        """Clear both segments. Cleared tracks stay 'never re-suggest'
+        (played_ids) — the autoplay engine rotates to another seed instead
+        of silently dying on this one."""
+        for t in (*st.user_queue, *st.auto_queue):
             vid = _video_id(t.webpage_url)
             if vid:
-                existing_ids.add(vid)
-        if st.current:
+                st.played_ids.append(vid)
+        st.user_queue.clear()
+        st.auto_queue.clear()
+
+    def _set_autoplay(self, guild_id: int, on: bool, by: str | None = None):
+        """Single choke point for every on/off path (command, panel, web)."""
+        st = self.state(guild_id)
+        st.autoplay = on
+        _event(guild_id, f"autoplay set to={on}" + (f" by={by}" if by else ""))
+        if on:
+            # bootstrap: works even while idle — the seed falls back to the
+            # last played track, so "autoplay ON" never means a silent bot.
+            self._autoplay_check(guild_id, "autoplay-on")
+
+    # ---------- autoplay engine ----------
+
+    def _autoplay_wanted(self, st: GuildState) -> bool:
+        """Loop modes own the queue — autoplay stands down while one is on."""
+        return st.loop_mode == "off"
+
+    def _pick_seed(self, st: GuildState) -> tuple[str, str] | None:
+        """Seed priority: fresh user pick > currently playing > last played >
+        stale user pick. Dry seeds are skipped so a poisoned seed (e.g. its
+        whole mix got /clear-ed) can't dead-end the engine."""
+        now = time.time()
+        cands: list[tuple[str | None, str]] = []
+        if st.user_seed_id and (now - st.user_seed_at) <= USER_SEED_WINDOW:
+            cands.append((st.user_seed_id, st.user_seed_title or "user pick"))
+        if st.current is not None:
+            cands.append((_video_id(st.current.webpage_url), st.current.title))
+        if st.last_played is not None:
+            cands.append((_video_id(st.last_played.webpage_url), st.last_played.title))
+        if st.user_seed_id and (now - st.user_seed_at) > USER_SEED_WINDOW:
+            cands.append((st.user_seed_id, st.user_seed_title or "user pick"))
+        tried: set[str] = set()
+        for vid, title in cands:
+            if not vid or vid in tried:
+                continue
+            tried.add(vid)
+            if vid in st.dry_seeds:
+                continue
+            return vid, title
+        return None
+
+    def _autoplay_check(self, guild_id: int, reason: str = ""):
+        """Central top-up brain — called from every queue mutation
+        (advance/drain/add/remove/clear/toggle/loop). Cheap + idempotent."""
+        st = self.state(guild_id)
+        if not st.autoplay or not self._autoplay_wanted(st):
+            return
+        # Act when the buffer runs low, or when everything is idle/empty
+        # (drain + bootstrap — the two moments autoplay must not miss).
+        if len(st.auto_queue) >= AUTO_TOPUP_AT and (st.current is not None or st.user_queue):
+            return
+        if st.mix_task and not st.mix_task.done():
+            return  # fill already in flight
+        seed = self._pick_seed(st)
+        if seed is None:
+            if st.auto_status != "dry":
+                _event(guild_id, f"autoplay-dry (no seed candidate) reason={reason}")
+            st.auto_status = "dry"
+            return
+        # a fresh trigger (usually a user action) beats a pending retry timer
+        if st.auto_retry_task and not st.auto_retry_task.done():
+            st.auto_retry_task.cancel()
+            st.auto_retry_task = None
+        vid, title = seed
+        _event(guild_id, f"autoplay-fill seed={vid} auto_len={len(st.auto_queue)} reason={reason}")
+        st.mix_task = self.bot.loop.create_task(self._autoplay_fill(guild_id, vid, title))
+
+    def _retry_delay(self, st: GuildState) -> float:
+        i = min(max(st.auto_retries - 1, 0), len(AUTO_RETRY_DELAYS) - 1)
+        return AUTO_RETRY_DELAYS[i]
+
+    def _schedule_auto_retry(self, guild_id: int, delay: float, reason: str):
+        """Schedule the next fill attempt after a failure or a dry seed. The
+        task re-checks autoplay + session before acting; any fresh user
+        trigger cancels it and retries immediately."""
+        st = self.state(guild_id)
+        if st.auto_retry_task and not st.auto_retry_task.done():
+            st.auto_retry_task.cancel()
+        session = st.mix_session_id
+
+        async def _retry():
+            try:
+                await asyncio.sleep(delay)
+                st2 = self.state(guild_id)
+                if st2.mix_session_id != session or not st2.autoplay:
+                    return
+                st2.auto_retry_task = None
+                self._autoplay_check(guild_id, f"retry({reason})")
+            except asyncio.CancelledError:
+                pass
+
+        st.auto_retry_task = self.bot.loop.create_task(_retry())
+
+    async def _get_mix_entries(self, seed_id: str) -> list[dict]:
+        """Radio-mix listing for a seed, cached per seed (TTL) so re-seeding,
+        dry re-checks and retries after /clear don't refetch the listing."""
+        now = time.time()
+        hit = self._mix_cache.get(seed_id)
+        if hit and now - hit[0] < MIX_CACHE_TTL:
+            return hit[1]
+        infos = await self._extract(
+            f"https://www.youtube.com/watch?v={seed_id}&list=RD{seed_id}",
+            playlist=True, flat=True, playlist_start=1, playlist_end=MIX_BATCH,
+        )
+        entries = [e for e in infos if e]
+        if len(self._mix_cache) >= MIX_CACHE_MAX:
+            oldest = min(self._mix_cache, key=lambda k: self._mix_cache[k][0])
+            self._mix_cache.pop(oldest, None)
+        self._mix_cache[seed_id] = (now, entries)
+        return entries
+
+    def _filter_auto_candidates(self, st: GuildState, entries: list[dict], seed_id: str | None) -> list[Track]:
+        """The one dedupe gate for every autoplay-path addition: drops the
+        seed itself, anything already queued, anything played/skipped/removed
+        this session, and intra-batch duplicates."""
+        bot_user = self.bot.user
+        if bot_user is None:
+            return []
+        seen: set[str] = set()
+        for t in (*st.user_queue, *st.auto_queue):
+            vid = _video_id(t.webpage_url)
+            if vid:
+                seen.add(vid)
+        if st.current is not None:
             cur_id = _video_id(st.current.webpage_url)
             if cur_id:
-                existing_ids.add(cur_id)
-
-        bot_user = self.bot.user
+                seen.add(cur_id)
         survivors: list[Track] = []
-        for d in infos:
+        for d in entries:
             if not d:
                 continue
             vid = d.get("id") or _video_id(d.get("webpage_url") or d.get("url") or "")
-            if not vid or vid == seed_id or vid in existing_ids or vid in st.played_ids:
-                continue
-            if bot_user is None:
+            if not vid or vid == seed_id or vid in seen or vid in st.played_ids:
                 continue
             track = self._to_track(d, bot_user, flat=True)
             if track:
                 track.from_mix = True
                 track.requester = "🔮 Autoplay"
                 survivors.append(track)
-                existing_ids.add(vid)
+                seen.add(vid)
+        return survivors
 
-        st.mix_seed_id = seed_id
-        st.mix_dry = len(survivors) == 0
-        st.autoplay_loading = False
+    def _extend_auto_tracks(self, st: GuildState, tracks: list[Track]) -> int:
+        """Append autoplay tracks and enforce the AUTO_MAX cap: drop the
+        oldest buffered entries first — they are the cheapest to regenerate."""
+        st.auto_queue.extend(tracks)
+        dropped = 0
+        while len(st.auto_queue) > AUTO_MAX:
+            st.auto_queue.pop(0)
+            dropped += 1
+        return dropped
 
-        if survivors:
-            _event(guild.id, f"autoplay-queued n={len(survivors)} seed={seed_id}")
-            st.queue.extend(survivors)
-            await self._update_panel(guild.id)
-            if was_empty:
-                await self._play_next(guild)
-        else:
-            _event(guild.id, f"autoplay-dry seed={seed_id}")
-            await self._update_panel(guild.id)
+    async def _autoplay_fill(self, guild_id: int, seed_id: str, seed_title: str):
+        """Top the auto segment up to AUTO_BUFFER_TARGET from the seed's radio
+        mix, sliced to target (small buffer = the next fill reflects the
+        latest taste signal instead of one giant stale tail).
+        Post-fetch guards make a Stop/toggle/loop-change mid-flight harmless,
+        and idleness is re-validated at insertion time so a fill can never
+        hijack a paused or playing track. Background task: never blocks the
+        voice-thread after-chain."""
+        guild = self.bot.get_guild(guild_id)
+        if guild is None:
+            return
+        st = self.state(guild_id)
+        session_id = st.mix_session_id
+        st.auto_status = "finding"
+        if st.current is None and not st.user_queue and not st.auto_queue:
+            await self._update_panel(guild_id)
+
+        try:
+            _event(guild_id, f"autoplay-fetch seed={seed_id} title={seed_title[:40]!r}")
+            entries = await self._get_mix_entries(seed_id)
+        except asyncio.CancelledError:
+            st.auto_status = "ok"
+            raise
+        except Exception as e:  # noqa: BLE001
+            st.auto_retries += 1
+            delay = self._retry_delay(st)
+            st.auto_status = "retrying"
+            _event(guild_id, f"autoplay-fetch FAILED err={e} retries={st.auto_retries} retry_in={delay:.0f}s")
+            self._schedule_auto_retry(guild_id, delay, "fetch-failed")
+            await self._update_panel(guild_id)
+            return
+
+        # Guard: session reset / autoplay off / loop took over while we fetched
+        if st.mix_session_id != session_id or not st.autoplay or not self._autoplay_wanted(st):
+            st.auto_status = "ok"
+            return
+
+        needed = AUTO_BUFFER_TARGET - len(st.auto_queue)
+        if needed <= 0:
+            st.auto_status = "ok"
+            return
+        survivors = self._filter_auto_candidates(st, entries, seed_id)
+        if not survivors:
+            st.dry_seeds.add(seed_id)
+            st.auto_status = "dry"
+            _event(guild_id, f"autoplay-dry seed={seed_id} — rotating to the next seed candidate")
+            self._schedule_auto_retry(guild_id, AUTO_DRY_RETRY_DELAY, "dry-rotate")
+            await self._update_panel(guild_id)
+            return
+        st.auto_retries = 0
+        st.auto_status = "ok"
+        # R1: re-validate idleness NOW, not at schedule time. A track that
+        # started or a pause that began mid-fetch means we only buffer —
+        # never force playback over a live or paused player.
+        vc = guild.voice_client
+        was_idle = (st.current is None and not st.user_queue and not st.auto_queue
+                    and (vc is None or (not vc.is_playing() and not vc.is_paused())))
+        st.auto_queue.extend(survivors[:needed])
+        _event(guild_id, f"autoplay-queued n={min(len(survivors), needed)} auto_len={len(st.auto_queue)} seed={seed_id}")
+        await self._update_panel(guild_id)
+        if was_idle:
+            await self._play_next(guild)
 
     async def _heal_voice(self, guild: discord.Guild, channel) -> discord.VoiceClient | None:
         """Return a connected voice client, reconnecting zombies via channel.
@@ -1793,11 +1993,16 @@ class Music(commands.Cog):
         if not force and st.loop_mode == "track" and st.current:
             nxt = st.current
         else:
-            if st.loop_mode == "queue" and st.current:
-                st.queue.append(st.current)
-            nxt = st.queue.pop(0) if st.queue else None
+            # loop=queue rotates the finished track within ITS OWN segment:
+            # user picks cycle together and never strand behind the autoplay
+            # buffer. A force-skip drops the skipped track instead of
+            # rotating it back in.
+            if st.loop_mode == "queue" and prev is not None and not force:
+                (st.auto_queue if prev.from_mix else st.user_queue).append(prev)
+            nxt = st.pop_head()
         st.current = nxt
         if nxt is not None:
+            st.last_played = nxt
             # Mark consumed the moment the track is handed to the player:
             # covers normal plays AND skips (both should never be re-suggested).
             vid = _video_id(nxt.webpage_url)
@@ -1806,26 +2011,26 @@ class Music(commands.Cog):
         if nxt is None:
             st.started_at = 0
             await self._update_panel(guild.id)
-            # Autoplay: if queue drained but we have a previous track, seed from it
-            if st.autoplay and prev is not None:
-                self._maybe_trigger_autoplay(guild, seed_track=prev)
+            # Autoplay: queue drained — the engine decides (and says) what's next
+            self._autoplay_check(guild.id, "drain")
             # schedule auto-leave on empty queue
             if self.inactivity_timeout > 0:
                 if st.leave_task and not st.leave_task.done():
                     st.leave_task.cancel()
                 st.leave_task = self.bot.loop.create_task(self._idle_leave(guild.id))
             return
-        # Autoplay: pre-fetch when queue runs low after advancing
-        self._maybe_trigger_autoplay(guild, seed_track=nxt)
+        # Autoplay: top the buffer up after advancing
+        self._autoplay_check(guild.id, "advance")
         if st.leave_task and not st.leave_task.done():
             st.leave_task.cancel()
         url = await self._refresh_stream(nxt)
         src = self._source(url, st.volume)
+        prev_started_at = st.started_at
         st.started_at = time.time()
         st.paused = False
         st.paused_at = 0.0
-        self._prewarm_next(guild.id)  # resolve queue[0] in background: skip stays warm
-        _event(guild.id, f"now-playing title={nxt.title!r} by={nxt.requester} left={len(st.queue)} loop={st.loop_mode} force_skip={force}")
+        self._prewarm_next(guild.id)  # resolve the queue head in background: skip stays warm
+        _event(guild.id, f"now-playing title={nxt.title!r} by={nxt.requester} user={len(st.user_queue)} auto={len(st.auto_queue)} loop={st.loop_mode} force_skip={force}")
 
         def _after(err: Exception | None):
             elapsed = time.time() - st.started_at if st.started_at else 999.0
@@ -1880,10 +2085,13 @@ class Music(commands.Cog):
             else:
                 _event(guild.id, "vc.play winner active, standing down")
             if nxt is not prev:
-                st.queue.insert(0, nxt)
-                if st.loop_mode == "queue" and prev is not None and st.queue and st.queue[-1] is prev:
-                    st.queue.pop()  # undo the rotation above
+                (st.auto_queue if nxt.from_mix else st.user_queue).insert(0, nxt)
+                # undo the loop=queue rotation of the still-current track
+                rot_seg = st.auto_queue if (prev is not None and prev.from_mix) else st.user_queue
+                if st.loop_mode == "queue" and not force and rot_seg and rot_seg[-1] is prev:
+                    rot_seg.pop()
             st.current = prev
+            st.started_at = prev_started_at  # keep the live track's progress clock honest
             return
         await self._update_panel(guild.id)
 
@@ -1894,7 +2102,7 @@ class Music(commands.Cog):
             return
         st = self.state(guild_id)
         vc = guild.voice_client
-        if vc and vc.is_connected() and not vc.is_playing() and not st.queue and not st.current:
+        if vc and vc.is_connected() and not vc.is_playing() and st.qtotal == 0 and not st.current:
             _event(guild_id, "auto-leave: idle timeout, disconnecting")
             await self._vc_disconnect(guild_id, vc)
             self._reset_state(st)
@@ -1909,10 +2117,10 @@ class Music(commands.Cog):
         em.add_field(name="Duration", value=f"`{fmt_duration(t.duration)}`")
         em.add_field(name="Progress", value=f"`{progress_bar(elapsed, t.duration)}`", inline=False)
         em.add_field(name="Requested by", value=t.requester)
-        em.add_field(name="Up next", value=str(len(st.queue)))
+        em.add_field(name="Up next", value=f"🎵 {len(st.user_queue)} · 🔮 {len(st.auto_queue)}")
         em.add_field(name="Loop", value=st.loop_mode)
         em.add_field(name="Volume", value=f"{int(st.volume * 100)}%")
-        em.add_field(name="Autoplay", value="ON" if st.autoplay else "OFF")
+        em.add_field(name="Autoplay", value=autoplay_label(st))
         if t.thumbnail:
             em.set_thumbnail(url=t.thumbnail)
         if t.webpage_url:
@@ -1924,10 +2132,11 @@ class Music(commands.Cog):
         vc = await self._ensure_voice(inter)
         if vc is None:
             return
-        self._insert_manual_track(st, track)
-        _event(inter.guild.id, f"queued title={track.title!r} by={track.requester} pos={len(st.queue)}")  # type: ignore
+        self._add_user_track(st, track)
+        self._autoplay_check(inter.guild.id, "add")  # type: ignore
+        _event(inter.guild.id, f"queued title={track.title!r} by={track.requester} pos={len(st.user_queue)}")  # type: ignore
         if vc.is_playing() or vc.is_paused():
-            await inter.followup.send(f"➕ Queued **{track.title}** (`{fmt_duration(track.duration)}`) — #{len(st.queue)}",
+            await inter.followup.send(f"➕ Queued **{track.title}** (`{fmt_duration(track.duration)}`) — #{len(st.user_queue)}",
                                       ephemeral=quiet)
         else:
             await self._play_next(inter.guild)  # type: ignore
@@ -2006,7 +2215,16 @@ class Music(commands.Cog):
                     pass
                 _event(guild.id, f"skip by={member} loop={st.loop_mode}")
                 return "⏭ Skipped."
-            if not st.queue:
+            if not st.qtotal:
+                if st.autoplay and st.loop_mode == "off" and st.current is None:
+                    # tell the user what autoplay is doing instead of a bare
+                    # "Queue is empty." — no silent dead ends.
+                    self._autoplay_check(guild.id, "skip-empty")
+                    if st.auto_status == "dry":
+                        return "Queue is empty — 🔮 autoplay ran dry. Add any song to re-seed it."
+                    if st.auto_status == "retrying":
+                        return "Queue is empty — 🔮 autoplay is retrying after a YouTube hiccup…"
+                    return "Queue is empty — 🔮 finding up next…"
                 return "Queue is empty."
             # idle next: abandon current (paused/drained/stuck) and play the
             # queue head. Runs _play_next_inner directly — we already hold
@@ -2066,6 +2284,7 @@ class Music(commands.Cog):
         st = self.state(guild.id)
         order = ["off", "track", "queue"]
         st.loop_mode = order[(order.index(st.loop_mode) + 1) % 3]
+        self._autoplay_check(guild.id, "loop-cycle")  # loop off → the buffer may need a top-up
         return f"🔁 Loop: **{st.loop_mode}**."
 
     def _do_volume(self, guild: discord.Guild, delta: int) -> str:
@@ -2083,11 +2302,11 @@ class Music(commands.Cog):
         if not t:
             em = discord.Embed(title="🎧 Music Panel", description="Nothing playing.\nPress **➕ Add** and drop a song name, video link, or playlist link.",
                                colour=discord.Colour.dark_grey())
-            em.add_field(name="Up next", value=str(len(st.queue)))
+            em.add_field(name="Up next", value=f"🎵 {len(st.user_queue)} · 🔮 {len(st.auto_queue)}")
             em.add_field(name="Loop", value=st.loop_mode)
             em.add_field(name="Volume", value=f"{int(st.volume * 100)}%")
-            em.add_field(name="Autoplay", value="ON" if st.autoplay else "OFF")
-            if st.autoplay_loading:
+            em.add_field(name="Autoplay", value=autoplay_label(st))
+            if st.autoplay and st.auto_status == "finding" and not st.qtotal:
                 em.description += "\n🔮 Finding up next…"
             return em
         elapsed = (time.time() - st.started_at) if st.started_at else 0
@@ -2095,11 +2314,11 @@ class Music(commands.Cog):
         em = discord.Embed(title="🎧 Music Panel", description=f"{icon} **{t.title}**", colour=discord.Colour.blurple())
         em.add_field(name="Progress", value=f"`{progress_bar(elapsed, t.duration)}` `{fmt_duration(t.duration)}`", inline=False)
         em.add_field(name="Requested by", value=t.requester)
-        em.add_field(name="Up next", value=str(len(st.queue)))
+        em.add_field(name="Up next", value=f"🎵 {len(st.user_queue)} · 🔮 {len(st.auto_queue)}")
         em.add_field(name="Loop", value=st.loop_mode)
         em.add_field(name="Volume", value=f"{int(st.volume * 100)}%")
-        em.add_field(name="Autoplay", value="ON" if st.autoplay else "OFF")
-        if st.autoplay_loading:
+        em.add_field(name="Autoplay", value=autoplay_label(st))
+        if st.autoplay and st.auto_status == "finding" and not st.qtotal:
             em.description += "\n🔮 Finding up next…"
         if t.thumbnail:
             em.set_thumbnail(url=t.thumbnail)
@@ -2171,7 +2390,8 @@ class Music(commands.Cog):
                 return
             st = self.state(inter.guild.id)  # type: ignore
             was_idle = not vc.is_playing() and not vc.is_paused() and st.current is None
-            st.queue.extend(tracks)
+            self._extend_user_tracks(st, tracks)
+            self._autoplay_check(inter.guild.id, "play-playlist")  # type: ignore
             st.last_playlist_url = query
             st.last_playlist_page = 1
             st.last_playlist_start_index = _get_playlist_start_index(query)
@@ -2204,7 +2424,8 @@ class Music(commands.Cog):
             st = self.state(inter.guild.id)  # type: ignore
             single = tracks[0]
             was_idle = not vc.is_playing() and not vc.is_paused() and st.current is None
-            self._insert_manual_track(st, single)
+            self._add_user_track(st, single)
+            self._autoplay_check(inter.guild.id, "play-mix-single")  # type: ignore
             vid = _video_id(single.webpage_url)
             mix_url = f"https://www.youtube.com/watch?v={vid}&list=RD{vid}" if vid else query
             view = QueueMixView(self, inter.guild.id, mix_url)  # type: ignore
@@ -2284,7 +2505,8 @@ class Music(commands.Cog):
             return
         st = self.state(inter.guild.id)  # type: ignore
         was_idle = not vc.is_playing() and not vc.is_paused() and st.current is None
-        st.queue.extend(tracks)
+        self._extend_user_tracks(st, tracks)
+        self._autoplay_check(inter.guild.id, "playlist-cmd")  # type: ignore
         st.last_playlist_url = url
         st.last_playlist_page = 1
         st.last_playlist_start_index = _get_playlist_start_index(url)
@@ -2356,10 +2578,11 @@ class Music(commands.Cog):
         lines = []
         if st.current:
             lines.append(f"**Now:** {st.current.title} (`{fmt_duration(st.current.duration)}`)")
+        tracks = [*st.user_queue, *st.auto_queue]
         start = (max(page, 1) - 1) * 10
-        for i, t in enumerate(st.queue[start:start + 10], start=start + 1):
+        for i, t in enumerate(tracks[start:start + 10], start=start + 1):
             lines.append(f"`{i}.` {t.title} (`{fmt_duration(t.duration)}`) — {t.requester}")
-        total_pages = max(1, math.ceil(len(st.queue) / 10)) if st.queue else 1
+        total_pages = max(1, math.ceil(len(tracks) / 10)) if tracks else 1
         em = discord.Embed(
             title=f"📜 Queue (page {page}/{total_pages})",
             description="\n".join(lines) or "Queue is empty.",
@@ -2384,34 +2607,30 @@ class Music(commands.Cog):
     @app_commands.describe(index="Queue position (see /queue, 1-based)")
     async def remove(self, inter: discord.Interaction, index: int):
         st = self.state(inter.guild.id)  # type: ignore
-        if 1 <= index <= len(st.queue):
-            t = st.queue.pop(index - 1)
-            vid = _video_id(t.webpage_url)
-            if vid:
-                st.played_ids.append(vid)
-            await inter.response.send_message(f"🗑 Removed **{t.title}**.")
-            await self._update_panel(inter.guild.id)  # type: ignore
-        else:
+        t = self._remove_at(st, index)
+        if t is None:
             await inter.response.send_message("Invalid index.", ephemeral=True)
+            return
+        vid = _video_id(t.webpage_url)
+        if vid:
+            st.played_ids.append(vid)
+        self._autoplay_check(inter.guild.id, "remove")  # type: ignore
+        await inter.response.send_message(f"🗑 Removed **{t.title}**.")
+        await self._update_panel(inter.guild.id)  # type: ignore
 
     @app_commands.command(name="clear", description="Clear the queue")
     async def clear(self, inter: discord.Interaction):
         st = self.state(inter.guild.id)  # type: ignore
-        for t in st.queue:
-            vid = _video_id(t.webpage_url)
-            if vid:
-                st.played_ids.append(vid)
-        st.queue.clear()
+        self._clear_queues(st)
+        self._autoplay_check(inter.guild.id, "clear")  # type: ignore
         await inter.response.send_message("🧹 Queue cleared.")
         await self._update_panel(inter.guild.id)  # type: ignore
 
     @app_commands.command(name="shuffle", description="Shuffle the queue")
     async def shuffle(self, inter: discord.Interaction):
         st = self.state(inter.guild.id)  # type: ignore
-        random.shuffle(st.queue)
-        for t in st.queue:
-            t.from_mix = False
-        await inter.response.send_message(f"🔀 Shuffled {len(st.queue)} tracks.")
+        n = self._do_shuffle(st)
+        await inter.response.send_message(f"🔀 Shuffled {n} tracks.")
         await self._update_panel(inter.guild.id)  # type: ignore
 
     @app_commands.command(name="loop", description="Set loop mode")
@@ -2428,6 +2647,7 @@ class Music(commands.Cog):
         else:
             st.loop_mode = mode
             msg = f"🔁 Loop: **{st.loop_mode}**."
+            self._autoplay_check(inter.guild.id, "loop-set")  # type: ignore
         await inter.response.send_message(msg)
         await self._update_panel(inter.guild.id)  # type: ignore
 
@@ -2451,13 +2671,7 @@ class Music(commands.Cog):
     ])
     async def autoplay(self, inter: discord.Interaction, mode: str | None = None):
         st = self.state(inter.guild.id)  # type: ignore
-        if mode is None:
-            st.autoplay = not st.autoplay
-        else:
-            st.autoplay = mode == "on"
-        _event(inter.guild.id, f"cmd-autoplay to={st.autoplay} by={inter.user}")  # type: ignore
-        if st.autoplay:
-            self._maybe_trigger_autoplay(inter.guild)  # type: ignore
+        self._set_autoplay(inter.guild.id, (not st.autoplay) if mode is None else mode == "on", by=str(inter.user))  # type: ignore
         await self._update_panel(inter.guild.id)  # type: ignore
         await inter.response.send_message(f"🔮 Autoplay is now **{'ON' if st.autoplay else 'OFF'}**.")
 
@@ -2592,7 +2806,7 @@ class Music(commands.Cog):
                 if st.leave_task and not st.leave_task.done():
                     st.leave_task.cancel()
                     st.leave_task = None
-                    if self.inactivity_timeout > 0 and not vc.is_playing() and not st.queue and not st.current:
+                    if self.inactivity_timeout > 0 and not vc.is_playing() and st.qtotal == 0 and not st.current:
                         st.leave_task = self.bot.loop.create_task(self._idle_leave(vc.guild.id))
                         _event(vc.guild.id, f"idle timer reset by rejoin by={member}")
 
@@ -2617,7 +2831,7 @@ class Music(commands.Cog):
             _event(guild.id, "bot left voice (intentional, no rejoin)")
             await self._update_panel(guild.id)
             return
-        if (st.current is not None or st.queue) and before.channel is not None:
+        if (st.current is not None or st.qtotal > 0) and before.channel is not None:
             _event(guild.id, "bot dropped from voice during playback, rejoining")
             self.bot.loop.create_task(self._rejoin_after_drop(guild.id, before.channel.id))
         else:
@@ -2652,7 +2866,8 @@ class Music(commands.Cog):
         was_paused = st.paused
         if st.current is not None:
             # old player object is bound to the dead socket: restart current track
-            st.queue.insert(0, st.current)
+            # at the head of its own segment, so play order is preserved
+            (st.auto_queue if st.current.from_mix else st.user_queue).insert(0, st.current)
             st.current = None
             st.started_at = 0
             await self._play_next(guild)
