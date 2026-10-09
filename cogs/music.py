@@ -798,7 +798,7 @@ class Music(commands.Cog):
         self._search_lock = asyncio.Lock()  # global pacing: both guilds share one egress IP
         self._last_search_ts = 0.0
         self._search_min_gap = 3.0
-        self.web_sessions: dict[str, dict] = {}  # token -> {guild_id,user_id,user_name,channel_id,expires_at,last_heartbeat}
+        self.web_sessions: dict[str, dict] = {}  # token -> {guild_id,user_id,user_name,channel_id,last_heartbeat} — no fixed expiry
         self.web_runner = None  # aiohttp AppRunner for the picker sidecar
         self.web_public_url: str | None = None  # cloudflared quick-tunnel URL, when live
         self.web_heartbeat_timeout = float(os.getenv("WEB_HEARTBEAT_TIMEOUT", "90"))
@@ -828,12 +828,27 @@ class Music(commands.Cog):
         except Exception:
             pass
 
+    def _prune_stale_web_sessions(self) -> int:
+        """Sweep sessions whose heartbeat went stale long enough that the
+        idle tunnel-kill has already fired (heartbeat timeout + shutdown
+        delay + buffer). With no fixed expiry this is the only way a
+        session ends: links live while used, die with the tunnel."""
+        default = self.web_heartbeat_timeout + self.tunnel_shutdown_delay + 60.0
+        try:
+            grace = float(os.getenv("WEB_SESSION_GRACE") or 0) or default
+        except ValueError:
+            grace = default
+        now = time.time()
+        stale = [tok for tok, s in self.web_sessions.items()
+                 if now - s.get("last_heartbeat", 0) > grace]
+        for tok in stale:
+            self.web_sessions.pop(tok, None)
+        return len(stale)
+
     def _has_active_web_sessions(self) -> bool:
-        """Return whether any unexpired picker session has a recent heartbeat."""
+        """Return whether any picker session has a recent heartbeat."""
         now = time.time()
         for sess in self.web_sessions.values():
-            if now > sess.get("expires_at", 0):
-                continue
             if now - sess.get("last_heartbeat", 0) < self.web_heartbeat_timeout:
                 return True
         return False
@@ -843,6 +858,7 @@ class Music(commands.Cog):
         try:
             while True:
                 await asyncio.sleep(10)
+                self._prune_stale_web_sessions()
                 try:
                     from web.tunnel import get_public_url
                     tunnel_live = bool(get_public_url())
@@ -877,6 +893,40 @@ class Music(commands.Cog):
         except Exception as e:  # noqa: BLE001
             print(f"[web] tunnel shutdown failed: {e}", flush=True)
 
+    def _tunnel_needed(self) -> bool:
+        """True when a picker link would fall back to loopback because the
+        quick tunnel is down (idle-stopped or dead) and nothing overrides it.
+        Config wins: never respawn when the user disabled the tunnel or set
+        their own non-loopback WEB_BASE_URL."""
+        explicit = (os.getenv("WEB_BASE_URL") or "").strip()
+        if explicit and "127.0.0.1" not in explicit and "localhost" not in explicit:
+            return False
+        try:
+            from web.tunnel import get_public_url, tunnel_enabled
+            if not tunnel_enabled():
+                return False
+            return not get_public_url()
+        except Exception:
+            return False
+
+    async def _ensure_public_tunnel(self, timeout: float = 12.0) -> str | None:
+        """On-demand quick-tunnel (re)start. The tunnel only auto-starts at
+        cog load; after an idle-shutdown or a cloudflared crash this respawns
+        it so picker taps keep handing out public links. Bounded wait so the
+        tap replies fast — a still-starting tunnel finishes in the background
+        and the next tap picks up the URL. Never raises."""
+        print("[web] on-demand tunnel restart — picker tap found tunnel down", flush=True)
+        port = int(os.getenv("WEB_PORT", "8765"))
+        try:
+            from web.tunnel import ensure_tunnel
+            url = await ensure_tunnel(port, timeout=timeout)
+        except Exception as e:  # noqa: BLE001 — tunnel is optional
+            print(f"[web] on-demand tunnel start failed: {e}", flush=True)
+            return None
+        if url:
+            self.web_public_url = url
+        return url
+
     def web_base_url(self) -> str:
         """Base URL for picker links. Priority:
         1. explicit non-loopback WEB_BASE_URL (user override)
@@ -886,16 +936,18 @@ class Music(commands.Cog):
         explicit = (os.getenv("WEB_BASE_URL") or "").strip().rstrip("/")
         if explicit and "127.0.0.1" not in explicit and "localhost" not in explicit:
             return explicit
-        if self.web_public_url:
-            return self.web_public_url
+        # Live tunnel state is the source of truth: the module global is
+        # cleared the instant cloudflared exits, this cached copy is not.
+        # Never serve a cached URL while the tunnel is down — it would be a
+        # dead link. Mirror live state so the cache can never go stale.
         try:
             from web.tunnel import get_public_url
             tun = get_public_url()
-            if tun:
-                self.web_public_url = tun
-                return tun
         except Exception:
-            pass
+            tun = None
+        self.web_public_url = tun
+        if tun:
+            return tun
         if explicit:
             return explicit
         return f"http://127.0.0.1:{port}"
@@ -907,7 +959,8 @@ class Music(commands.Cog):
             "user_id": user.id,
             "user_name": getattr(user, "display_name", str(user)),
             "channel_id": channel_id,
-            "expires_at": time.time() + 900,  # 15 min link
+            # No fixed expiry: the link lives while it's used (any /api call
+            # is a heartbeat) and dies with the idle tunnel-kill.
             "last_heartbeat": time.time(),
         }
         return token, f"{self.web_base_url()}/pick?token={token}"
@@ -2397,6 +2450,11 @@ class Music(commands.Cog):
         channel_id = None
         if isinstance(user, discord.Member) and user.voice and user.voice.channel:
             channel_id = user.voice.channel.id
+        # On-demand tunnel: after an idle-shutdown or a cloudflared crash the
+        # tap itself respawns the tunnel, so this link — or at worst the next
+        # one — is public again. Bounded wait, already deferred above.
+        if self._tunnel_needed():
+            await self._ensure_public_tunnel()
         token, url = self.create_web_session(inter.guild.id, user, channel_id)
         view = discord.ui.View(timeout=None)
         view.add_item(discord.ui.Button(label="🌐 Open YouTube picker", url=url))
@@ -2404,13 +2462,13 @@ class Music(commands.Cog):
         if "trycloudflare.com" in base:
             note = "\n☁️ Public link via Cloudflare — works on any network, no setup needed."
         elif "127.0.0.1" in base or "localhost" in base:
-            note = "\n⚠️ Tunnel not up yet and no `WEB_BASE_URL` set — this link only works on the host. Wait ~30s and retry, or set `WEB_BASE_URL`."
+            note = "\n⚠️ Public tunnel still starting or unavailable — this link only works on this machine. Tap 🌐 Picker again in ~10s, or set `WEB_BASE_URL`."
         else:
             note = ""
         if channel_id is None:
             note += "\n Join a voice channel before pressing **Queue on bot**."
         await inter.followup.send(
-            f"🌐 Pick songs in your browser (search + real YouTube player, 15-min link):\n{url}"
+            f"🌐 Pick songs in your browser (search + real YouTube player — the link stays live while you use it):\n{url}"
             f"\nSearch, tap to preview, **➕ Queue on bot** — search load stays off the bot.{note}",
             view=view,
             ephemeral=True,

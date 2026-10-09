@@ -16,15 +16,20 @@ from pathlib import Path
 from aiohttp import web
 
 VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
+_VID_IN_URL = re.compile(r"(?:[?&]v=|youtu\.be/|/shorts/)([A-Za-z0-9_-]{11})")
 WEB_DIR = Path(__file__).parent
 
 
+def _yt_fallback_on() -> bool:
+    return (os.getenv("SEARCH_YT_FALLBACK", "true").strip().lower() in ("1", "true", "yes"))
+
+
 def _session_valid(cog, token: str):
+    # No fixed expiry: a session lives while it's used (every /api call is a
+    # heartbeat). Stale sessions are swept by the cog's idle-tunnel monitor
+    # (_prune_stale_web_sessions) once the tunnel idle-kill has fired.
     sess = cog.web_sessions.get(token)
     if not sess:
-        return None
-    if time.time() > sess.get("expires_at", 0):
-        cog.web_sessions.pop(token, None)
         return None
     sess["last_heartbeat"] = time.time()
     return sess
@@ -51,25 +56,50 @@ def build_app(cog) -> web.Application:
             "guild": guild.name if guild else str(sess["guild_id"]),
             "user": sess.get("user_name", ""),
             "queue_len": len(cog.state(sess["guild_id"]).queue),
-            "expires_in": max(0, int(sess["expires_at"] - time.time())),
+            # null → no fixed expiry; the page hides the countdown
+            "expires_in": None,
         })
 
     async def search_config(_req):
-        from .search import instances
-        return web.json_response({"ok": True, "searchInstances": instances()})
+        from .search import backends, instances
+        return web.json_response({
+            "ok": True,
+            "searchBackends": backends(),      # [{url, kind}] — raced in parallel
+            "searchInstances": instances(),   # compat: bare urls
+        })
 
     async def search_proxy(req):
         import aiohttp as _aiohttp
 
-        from .search import instances, server_search
+        from .search import server_search
         q = (req.query.get("q", "") or "").strip()
         if not q:
             return web.json_response({"ok": False, "error": "Empty query."}, status=400)
         async with _aiohttp.ClientSession() as session:
             results, via = await server_search(q, session)
+        if not results and _yt_fallback_on():
+            # every public backend is down — last resort: the bot's own
+            # throttled yt-dlp search (same pacing + retry path as /play).
+            try:
+                kind, tracks = await cog._resolve_input(cog.bot.user, q)
+            except Exception as e:  # noqa: BLE001
+                print(f"[web-search] yt-dlp fallback failed: {type(e).__name__}: {e}", flush=True)
+                kind, tracks = "error", []
+            out = []
+            if kind == "search":
+                for t in tracks:
+                    m = _VID_IN_URL.search(t.webpage_url or "")
+                    if not m:
+                        continue
+                    out.append({"videoId": m.group(1), "title": t.title,
+                                "uploader": t.uploader or "?", "duration": t.duration or 0,
+                                "thumbnail": t.thumbnail or ""})
+                if out:
+                    results, via = out, "yt-dlp"
+                    print(f"[web-search] yt-dlp fallback ok n={len(out)} q={q!r}", flush=True)
         if not results:
             return web.json_response(
-                {"ok": False, "error": f"No results (tried {len(instances())} search backends). Try pasting a link below."},
+                {"ok": False, "error": "No results — every search backend is unreachable right now. Try pasting a link below."},
                 status=502,
             )
         return web.json_response({"ok": True, "results": results, "via": via})
@@ -144,6 +174,30 @@ def build_app(cog) -> web.Application:
             return web.json_response({"ok": False, "error": "Bad videoId."}, status=400)
         async with _aiohttp.ClientSession() as session:
             results, via = await server_related(vid, session)
+        if not results and _yt_fallback_on():
+            # public backends down — cap the radio-mix listing at 12 so this
+            # stays as cheap as the autoplay top-up the bot already does.
+            try:
+                infos = await cog._extract(
+                    f"https://www.youtube.com/watch?v={vid}&list=RD{vid}",
+                    playlist=True, flat=True, playlist_start=2, playlist_end=13,
+                )
+            except Exception as e:  # noqa: BLE001
+                print(f"[web-search] yt-dlp related fallback failed: {type(e).__name__}", flush=True)
+                infos = []
+            out = []
+            for d in infos or []:
+                m = _VID_IN_URL.search(str(d.get("url") or d.get("webpage_url") or ""))
+                if not m:
+                    continue
+                v = m.group(1)
+                out.append({"videoId": v, "title": str(d.get("title") or "Unknown title")[:200],
+                            "uploader": str(d.get("uploader") or d.get("channel") or "?")[:200],
+                            "duration": int(d.get("duration") or 0),
+                            "thumbnail": f"https://i.ytimg.com/vi/{v}/hqdefault.jpg"})
+            if out:
+                results, via = out, "yt-dlp"
+                print(f"[web-search] yt-dlp related fallback ok n={len(out)} vid={vid}", flush=True)
         return web.json_response({"ok": True, "results": results, "via": via})
 
     async def suggest(req):

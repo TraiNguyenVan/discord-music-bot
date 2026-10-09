@@ -38,6 +38,12 @@ def find_cloudflared() -> str | None:
 
 
 def get_public_url() -> str | None:
+    """Live tunnel URL, or None. Source of truth: if the cloudflared process
+    has exited, its URL is dead even before _drain sees stderr EOF (an
+    orphaned child can hold the pipe open briefly) — never hand it out."""
+    global public_url
+    if _proc is not None and _proc.returncode is not None:
+        public_url = None
     return public_url
 
 
@@ -101,11 +107,13 @@ async def ensure_tunnel(port: int, timeout: float = 40.0) -> str | None:
     global _proc, public_url
     if not tunnel_enabled():
         return None
-    if public_url:
-        return public_url
+    url = get_public_url()
+    if url:
+        return url
     async with _lock:
-        if public_url:
-            return public_url
+        url = get_public_url()
+        if url:
+            return url
         if _proc is not None and _proc.returncode is None:
             pass  # already starting/running; fall through to wait below
         else:
