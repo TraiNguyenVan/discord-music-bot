@@ -3,6 +3,7 @@ import collections
 import math
 import os
 import random
+import secrets
 import time
 from dataclasses import dataclass, field
 from urllib.parse import parse_qs, urlparse
@@ -124,6 +125,7 @@ class GuildState:
     volume: float = 0.5  # 0.0 - 2.0
     started_at: float = 0.0
     paused: bool = False
+    paused_at: float = 0.0  # when pause began; elapsed freezes here until resume
     search_results: list[Track] = field(default_factory=list)
     leave_task: asyncio.Task | None = None
     panel_channel_id: int | None = None
@@ -167,6 +169,32 @@ def progress_bar(elapsed: float, total: int, width: int = 15) -> str:
 
 def _event(guild_id: int | str, msg: str):
     print(f"[event] guild={guild_id} {msg}", flush=True)
+
+
+def now_status(st: GuildState) -> dict:
+    """Sync snapshot for the web picker: pause state + frozen-while-paused elapsed."""
+    if st.current is None or not st.started_at:
+        return {"playing": False}
+    if st.paused and st.paused_at:
+        elapsed = max(0.0, st.paused_at - st.started_at)
+    else:
+        elapsed = max(0.0, time.time() - st.started_at)
+    t = st.current
+    return {
+        "playing": True,
+        "title": t.title,
+        "uploader": t.uploader,
+        "duration": t.duration,
+        "thumbnail": t.thumbnail,
+        "webpage_url": t.webpage_url,
+        "requester": t.requester,
+        "paused": st.paused,
+        "elapsed": elapsed,
+        "queue_len": len(st.queue),
+        "loop": st.loop_mode,
+        "volume": int(st.volume * 100),
+        "autoplay": st.autoplay,
+    }
 
 
 async def _safe_defer(inter: discord.Interaction, ephemeral: bool = False, retries: int = 1):
@@ -735,6 +763,11 @@ class MusicPanelView(discord.ui.View):
             f"🔮 Autoplay is now **{'ON' if st.autoplay else 'OFF'}**.", ephemeral=True
         )
 
+    @discord.ui.button(label="🌐 Picker", style=discord.ButtonStyle.success, custom_id="music:picker", row=2)
+    async def picker(self, inter: discord.Interaction, _btn: discord.ui.Button):
+        # Fresh per-tap link (tokens expire) — no voice needed to open it.
+        await self.cog._send_picker_link(inter)
+
     @discord.ui.button(label="🔄 Refresh", style=discord.ButtonStyle.secondary, custom_id="music:refresh", row=1)
     async def refresh(self, inter: discord.Interaction, _btn: discord.ui.Button):
         try:
@@ -755,6 +788,151 @@ class Music(commands.Cog):
         self._search_lock = asyncio.Lock()  # global pacing: both guilds share one egress IP
         self._last_search_ts = 0.0
         self._search_min_gap = 3.0
+        self.web_sessions: dict[str, dict] = {}  # token -> {guild_id,user_id,user_name,channel_id,expires_at}
+        self.web_runner = None  # aiohttp AppRunner for the picker sidecar
+        self.web_public_url: str | None = None  # cloudflared quick-tunnel URL, when live
+
+    async def cog_load(self):
+        try:
+            from web.server import start_web_server
+            self.bot.loop.create_task(start_web_server(self))
+        except Exception as e:  # noqa: BLE001 — picker is optional, bot works without it
+            print(f"[web] picker disabled: {e}", flush=True)
+
+    def web_base_url(self) -> str:
+        """Base URL for picker links. Priority:
+        1. explicit non-loopback WEB_BASE_URL (user override)
+        2. live cloudflared quick-tunnel URL (zero-config, works anywhere)
+        3. loopback fallback (host-only)."""
+        port = int(os.getenv("WEB_PORT", "8765"))
+        explicit = (os.getenv("WEB_BASE_URL") or "").strip().rstrip("/")
+        if explicit and "127.0.0.1" not in explicit and "localhost" not in explicit:
+            return explicit
+        if self.web_public_url:
+            return self.web_public_url
+        try:
+            from web.tunnel import get_public_url
+            tun = get_public_url()
+            if tun:
+                self.web_public_url = tun
+                return tun
+        except Exception:
+            pass
+        if explicit:
+            return explicit
+        return f"http://127.0.0.1:{port}"
+
+    def create_web_session(self, guild_id: int, user, channel_id: int | None) -> tuple[str, str]:
+        token = secrets.token_urlsafe(24)
+        self.web_sessions[token] = {
+            "guild_id": guild_id,
+            "user_id": user.id,
+            "user_name": getattr(user, "display_name", str(user)),
+            "channel_id": channel_id,
+            "expires_at": time.time() + 900,  # 15 min link
+        }
+        return token, f"{self.web_base_url()}/pick?token={token}"
+
+    async def queue_client_pick(self, guild_id: int, user_id: int, data: dict) -> tuple[bool, str]:
+        """Queue a video the CLIENT already resolved in its embedded player.
+
+        Bot does zero search/listing here — only a single deep yt-dlp resolve
+        of this one videoId when it reaches the queue head (for voice).
+        """
+        import re as _re
+
+        vid = str(data.get("video_id", ""))
+        if not _re.match(r"^[A-Za-z0-9_-]{11}$", vid):
+            return False, "Invalid videoId."
+        guild = self.bot.get_guild(guild_id)
+        if guild is None:
+            return False, "Server gone."
+        member = guild.get_member(user_id)
+        if member is None:
+            try:
+                member = await guild.fetch_member(user_id)
+            except discord.HTTPException:
+                return False, "User gone."
+        channel = None
+        try:
+            vs = getattr(member, "voice", None)
+            channel = vs.channel if vs else None
+        except Exception:
+            channel = None
+        if channel is None:
+            # fall back to the voice channel the user was in when opening the link
+            for sess in self.web_sessions.values():
+                if sess.get("guild_id") == guild_id and sess.get("user_id") == user_id and sess.get("channel_id"):
+                    channel = guild.get_channel(sess["channel_id"])
+                    break
+        if channel is None:
+            return False, "Join a voice channel first, then press Queue again."
+        vc = await self._heal_voice(guild, channel)
+        if vc is None:
+            return False, "Could not join voice — try again."
+        if vc.channel != channel:
+            try:
+                await vc.move_to(channel)
+            except Exception:
+                return False, "Could not move to your voice channel."
+        title = str(data.get("title") or "Unknown title")[:200]
+        uploader = str(data.get("uploader") or "?")[:200]
+        try:
+            duration = int(data.get("duration") or 0)
+        except (TypeError, ValueError):
+            duration = 0
+        thumb = str(data.get("thumbnail") or "")[:500] or None
+        page = f"https://www.youtube.com/watch?v={vid}"
+        track = Track(
+            title=title,
+            webpage_url=page,
+            stream_url=page,  # placeholder; deep-resolved on play
+            duration=duration,
+            thumbnail=thumb,
+            uploader=uploader,
+            requester=getattr(member, "display_name", str(member)),
+            requester_id=user_id,
+            needs_resolve=True,
+        )
+        st = self.state(guild_id)
+        was_idle = not vc.is_playing() and not vc.is_paused() and st.current is None
+        self._insert_manual_track(st, track)
+        _event(guild_id, f"web-pick title={title!r} vid={vid} by={member} idle={was_idle}")
+        if was_idle:
+            await self._play_next(guild)
+            msg = f"▶ Started **{title}** (picked in browser)."
+        else:
+            msg = f"➕ Queued **{title}** (picked in browser) — #{len(st.queue)}."
+        await self._update_panel(guild_id)
+        return True, msg
+
+    def web_now(self, guild_id: int) -> dict:
+        """Sync snapshot for the picker page (pause state + timestamp)."""
+        return now_status(self.state(guild_id))
+
+    async def web_control(self, guild_id: int, user_id: int, action: str) -> tuple[bool, str]:
+        """Pause/resume/skip from the picker page. Same code paths as the buttons."""
+        guild = self.bot.get_guild(guild_id)
+        if guild is None:
+            return False, "Server gone."
+        if action == "toggle":
+            msg = self._do_toggle(guild)
+            ok = msg != "Nothing playing."
+            await self._update_panel(guild_id)
+            _event(guild_id, f"web-control toggle -> {msg} by={user_id}")
+            return ok, msg
+        if action == "skip":
+            member = guild.get_member(user_id)
+            if member is None:
+                try:
+                    member = await guild.fetch_member(user_id)
+                except discord.HTTPException:
+                    return False, "User gone."
+            msg = await self._do_skip(guild, member)  # type: ignore
+            await self._update_panel(guild_id)
+            _event(guild_id, f"web-control skip -> {msg} by={member}")
+            return True, msg
+        return False, "Unknown action."
 
     async def _search_gate(self):
         """Enforce ≥3s between YouTube search/listing extractions globally.
@@ -778,6 +956,7 @@ class Music(commands.Cog):
         st.queue.clear()
         st.current = None
         st.paused = False
+        st.paused_at = 0.0
         st._force_next_skip = False
         st._skip_stop = False
         st.self_disconnect = False
@@ -1189,6 +1368,7 @@ class Music(commands.Cog):
         src = self._source(url, st.volume)
         st.started_at = time.time()
         st.paused = False
+        st.paused_at = 0.0
         self._prewarm_next(guild.id)  # resolve queue[0] in background: skip stays warm
         _event(guild.id, f"now-playing title={nxt.title!r} by={nxt.requester} left={len(st.queue)} loop={st.loop_mode} force_skip={force}")
 
@@ -1396,15 +1576,34 @@ class Music(commands.Cog):
             _event(guild.id, f"skip idle-next by={member} loop={st.loop_mode}")
             return "⏭ Skipped — playing next."
 
+    def _set_paused(self, st: GuildState, vc, paused: bool):
+        """Flip pause state, freezing/shifting started_at so elapsed timestamps
+        stay synced (panel progress bar + web picker) across pauses."""
+        if paused:
+            try:
+                vc.pause()
+            except Exception:
+                pass
+            st.paused = True
+            st.paused_at = time.time()
+        else:
+            try:
+                vc.resume()
+            except Exception:
+                pass
+            if st.paused_at:
+                st.started_at += time.time() - st.paused_at
+                st.paused_at = 0.0
+            st.paused = False
+
     def _do_toggle(self, guild: discord.Guild) -> str:
         vc = guild.voice_client
+        st = self.state(guild.id)
         if vc and vc.is_playing():
-            vc.pause()
-            self.state(guild.id).paused = True
+            self._set_paused(st, vc, True)
             return "⏸ Paused."
         if vc and vc.is_paused():
-            vc.resume()
-            self.state(guild.id).paused = False
+            self._set_paused(st, vc, False)
             return "▶ Resumed."
         return "Nothing playing."
 
@@ -1668,8 +1867,7 @@ class Music(commands.Cog):
     async def pause(self, inter: discord.Interaction):
         vc = inter.guild.voice_client  # type: ignore
         if vc and vc.is_playing():
-            vc.pause()
-            self.state(inter.guild.id).paused = True  # type: ignore
+            self._set_paused(self.state(inter.guild.id), vc, True)  # type: ignore
             await self._update_panel(inter.guild.id)  # type: ignore
             await inter.response.send_message("⏸ Paused.")
         else:
@@ -1679,8 +1877,7 @@ class Music(commands.Cog):
     async def resume(self, inter: discord.Interaction):
         vc = inter.guild.voice_client  # type: ignore
         if vc and vc.is_paused():
-            vc.resume()
-            self.state(inter.guild.id).paused = False  # type: ignore
+            self._set_paused(self.state(inter.guild.id), vc, False)  # type: ignore
             await self._update_panel(inter.guild.id)  # type: ignore
             await inter.response.send_message("▶ Resumed.")
         else:
@@ -1809,10 +2006,57 @@ class Music(commands.Cog):
         await self._update_panel(inter.guild.id)  # type: ignore
         await inter.response.send_message(f"🔮 Autoplay is now **{'ON' if st.autoplay else 'OFF'}**.")
 
+    async def _send_picker_link(self, inter: discord.Interaction):
+        """Ephemeral fresh picker link (per-tap token). Shared by the panel's
+        🌐 Picker button and /music mode:web. No voice required to open the
+        link — only to press Queue inside the page."""
+        try:
+            await _safe_defer(inter, ephemeral=True)
+        except discord.NotFound:
+            return
+        except Exception as e:  # noqa: BLE001
+            _event(inter.guild.id if inter.guild else "DM", f"picker-link ack FAILED err={e}")
+            return
+        if inter.guild is None:
+            await inter.followup.send("Use this inside a server.", ephemeral=True)
+            return
+        user = inter.user
+        channel_id = None
+        if isinstance(user, discord.Member) and user.voice and user.voice.channel:
+            channel_id = user.voice.channel.id
+        token, url = self.create_web_session(inter.guild.id, user, channel_id)
+        view = discord.ui.View(timeout=None)
+        view.add_item(discord.ui.Button(label="🌐 Open YouTube picker", url=url))
+        base = self.web_base_url()
+        if "trycloudflare.com" in base:
+            note = "\n☁️ Public link via Cloudflare — works on any network, no setup needed."
+        elif "127.0.0.1" in base or "localhost" in base:
+            note = "\n⚠️ Tunnel not up yet and no `WEB_BASE_URL` set — this link only works on the host. Wait ~30s and retry, or set `WEB_BASE_URL`."
+        else:
+            note = ""
+        if channel_id is None:
+            note += "\n Join a voice channel before pressing **Queue on bot**."
+        await inter.followup.send(
+            f"🌐 Pick songs in your browser (search + real YouTube player, 15-min link):\n{url}"
+            f"\nSearch, tap to preview, **➕ Queue on bot** — search load stays off the bot.{note}",
+            view=view,
+            ephemeral=True,
+        )
+        _event(inter.guild.id, f"web-picker link by={user}")
+
     @app_commands.command(name="music", description="Open the interactive music panel (no typing needed)")
-    async def music(self, inter: discord.Interaction):
+    @app_commands.describe(mode="panel: classic buttons · web: browser YouTube picker")
+    @app_commands.choices(mode=[
+        app_commands.Choice(name="panel", value="panel"),
+        app_commands.Choice(name="web", value="web"),
+    ])
+    async def music(self, inter: discord.Interaction, mode: str = "panel"):
         if inter.guild is None:
             await inter.response.send_message("Use /music inside a server.", ephemeral=True)
+            return
+        if mode == "web":
+            # Same picker link as the panel's 🌐 Picker button.
+            await self._send_picker_link(inter)
             return
         await inter.response.defer()
         st = self.state(inter.guild.id)
@@ -1859,7 +2103,7 @@ class Music(commands.Cog):
     @app_commands.command(name="help", description="List commands")
     async def help(self, inter: discord.Interaction):
         em = discord.Embed(title="🎧 Music Bot", colour=discord.Colour.blurple(),
-                            description="**/music** — button panel, no typing needed\n/play /search /playlist /queue /nowplaying\n/skip /pause /resume /stop\n/remove /clear /shuffle /loop /volume\n/join /leave")
+                            description="**/music** — button panel (🌐 Picker = browser YouTube search)\n/play /search /playlist /queue /nowplaying\n/skip /pause /resume /stop\n/remove /clear /shuffle /loop /volume\n/join /leave")
         em.set_footer(text="Tip: 'Sign in to confirm you're not a bot' → add cookies.txt and rebuild.")
         await inter.response.send_message(embed=em, ephemeral=True)
 
@@ -1957,6 +2201,7 @@ class Music(commands.Cog):
                 if nv is not None and nv.is_playing():
                     nv.pause()
                     st.paused = True
+                    st.paused_at = time.time()
         await self._update_panel(guild_id)
 
 

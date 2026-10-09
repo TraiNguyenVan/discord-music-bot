@@ -1,0 +1,329 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Music Bot — YouTube Picker</title>
+<style>
+  :root { color-scheme: dark; }
+  body { font-family: system-ui, sans-serif; background: #121216; color: #eee; margin: 0; padding: 16px; max-width: 720px; margin-inline: auto; }
+  h1 { font-size: 1.2rem; margin: 4px 0; }
+  .card { background: #1d1d24; border-radius: 12px; padding: 12px; margin: 12px 0; }
+  input[type=text] { width: 100%; box-sizing: border-box; padding: 10px; border-radius: 8px; border: 1px solid #444; background: #101014; color: #eee; }
+  .row { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+  button { padding: 10px 14px; border-radius: 8px; border: 0; cursor: pointer; font-weight: 600; }
+  .primary { background: #5865F2; color: #fff; }
+  .good { background: #57F287; color: #06240f; }
+  .ghost { background: #2b2b35; color: #eee; }
+  button:disabled { opacity: .4; cursor: default; }
+  #player { width: 100%; aspect-ratio: 16/9; border-radius: 12px; overflow: hidden; background: #000; }
+  .meta { font-size: .9rem; color: #bbb; }
+  #status { white-space: pre-wrap; font-size: .9rem; }
+  #results { display: flex; flex-direction: column; gap: 8px; }
+  .yt-card { display: flex; gap: 10px; background: #24242e; border-radius: 10px; padding: 8px; cursor: pointer; align-items: center; }
+  .yt-card img { width: 128px; aspect-ratio: 16/9; object-fit: cover; border-radius: 6px; background: #000; flex-shrink: 0; }
+  .yt-info { flex: 1; min-width: 0; }
+  .yt-title { font-size: .9rem; font-weight: 600; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .yt-sub { font-size: .8rem; color: #999; margin-top: 2px; }
+  .yt-add { flex-shrink: 0; padding: 8px 10px; }
+  .sticky-search { position: sticky; top: 0; z-index: 5; background: #121216; padding: 8px 0; }
+  .bar { height: 8px; background: #33333d; border-radius: 4px; overflow: hidden; margin-top: 6px; }
+  .bar-fill { height: 100%; background: #5865F2; width: 0%; }
+  .bot-title { font-size: .95rem; font-weight: 600; }
+</style>
+</head>
+<body>
+<h1>🎧 YouTube Picker</h1>
+<div id="ctx" class="meta">Loading session…</div>
+
+<div class="card" id="botcard">
+  <div class="bot-title" id="botnow">🔊 Connecting to bot…</div>
+  <div class="bar"><div class="bar-fill" id="botbar"></div></div>
+  <div class="meta" id="bottime"></div>
+  <div class="row">
+    <button id="bottoggle" class="ghost">⏸ Pause</button>
+    <button id="botskip" class="ghost">⏭ Skip</button>
+  </div>
+</div>
+
+<div class="sticky-search">
+  <div class="card" style="margin:0">
+    <input id="q" type="text" placeholder="Search YouTube… e.g. artist - title" autocomplete="off">
+    <div class="row">
+      <button id="search" class="primary">🔎 Search</button>
+    </div>
+    <div id="count" class="meta"></div>
+  </div>
+</div>
+
+<div class="card">
+  <div id="results"><div class="meta">Type something and hit Search — results appear here. Tap any video to preview it below.</div></div>
+</div>
+
+<div class="card">
+  <div id="player"></div>
+  <div id="now" class="meta" style="margin-top:8px">No video loaded.</div>
+  <div class="row">
+    <button id="queue" class="good" disabled>➕ Queue on bot</button>
+  </div>
+  <div id="status" class="meta"></div>
+</div>
+
+<div class="card">
+  <div class="meta">…or paste a link / ID directly:</div>
+  <div class="row">
+    <input id="url" type="text" placeholder="https://youtu.be/… or 11-char ID">
+  </div>
+  <div class="row">
+    <button id="preview" class="ghost">▶ Preview link</button>
+  </div>
+</div>
+
+<script src="https://www.youtube.com/iframe_api"></script>
+<script>
+const params = new URLSearchParams(location.search);
+const token = params.get("token") || "";
+const $ = (id) => document.getElementById(id);
+const statusEl = $("status"), nowEl = $("now"), ctxEl = $("ctx"),
+      resultsEl = $("results"), countEl = $("count");
+
+function setStatus(s) { statusEl.textContent = s; }
+function fmtDur(s) {
+  s = Math.round(s || 0);
+  if (!s) return "LIVE";
+  const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), sec = s % 60;
+  return (h ? h + ":" + String(m).padStart(2, "0") : m) + ":" + String(sec).padStart(2, "0");
+}
+function videoIdFromInput(s) {
+  s = (s || "").trim();
+  if (/^[A-Za-z0-9_-]{11}$/.test(s)) return s;
+  const m = s.match(/[?&]v=([A-Za-z0-9_-]{11})/) || s.match(/youtu\.be\/([A-Za-z0-9_-]{11})/)
+    || s.match(/\/shorts\/([A-Za-z0-9_-]{11})/) || s.match(/\/embed\/([A-Za-z0-9_-]{11})/);
+  return m ? (m[1] || m[2] || m[3] || m[4]) : null;
+}
+
+// ---- player ----
+let player = null, playerReady = false;
+let selected = null; // {videoId,title,uploader,duration,thumbnail} — what Queue sends
+window.onYouTubeIframeAPIReady = function () {
+  player = new YT.Player("player", {
+    height: "100%", width: "100%", playerVars: { rel: 0 },
+    events: { onReady: () => { playerReady = true; }, onStateChange: syncFromPlayer },
+  });
+};
+function syncFromPlayer() {
+  // user tapped something inside the embed itself (e.g. end-screen) — adopt it
+  try {
+    const d = player && player.getVideoData ? player.getVideoData() : null;
+    if (d && d.video_id && (!selected || d.video_id !== selected.videoId)) {
+      let dur = 0;
+      try { dur = Math.round(player.getDuration() || 0); } catch (e) {}
+      selected = { videoId: d.video_id, title: d.title || ("YouTube video " + d.video_id),
+                   uploader: d.author || "?", duration: dur,
+                   thumbnail: "https://i.ytimg.com/vi/" + d.video_id + "/hqdefault.jpg" };
+      refreshNow();
+    }
+  } catch (e) {}
+}
+setInterval(syncFromPlayer, 3000);
+
+function preview(meta) {
+  selected = meta;
+  if (player && playerReady && player.loadVideoById) player.loadVideoById(meta.videoId);
+  refreshNow();
+  document.getElementById("player").scrollIntoView({ behavior: "smooth", block: "center" });
+}
+function refreshNow() {
+  if (selected) {
+    nowEl.textContent = "🎬 " + selected.title + " — " + selected.uploader + " (" + fmtDur(selected.duration) + ")";
+    $("queue").disabled = false;
+  } else {
+    nowEl.textContent = "No video loaded.";
+    $("queue").disabled = true;
+  }
+}
+
+// ---- search (browser direct first, bot proxy fallback) ----
+let SEARCH_HOSTS = ["https://api.piped.private.coffee"];
+fetch("/api/config").then(r => r.json()).then(j => {
+  if (j && j.ok && j.searchInstances && j.searchInstances.length) SEARCH_HOSTS = j.searchInstances;
+}).catch(() => {});
+
+function normItems(items) {
+  const out = [], seen = new Set();
+  for (const it of items || []) {
+    if (!it || typeof it.url !== "string" || it.url.indexOf("/watch") < 0) continue;
+    const m = it.url.match(/[?&]v=([A-Za-z0-9_-]{11})/);
+    if (!m || seen.has(m[1])) continue;
+    seen.add(m[1]);
+    const dur = Math.max(0, parseInt(it.duration || 0, 10) || 0);
+    out.push({ videoId: m[1], title: String(it.title || "Unknown title").slice(0, 200),
+               uploader: String(it.uploaderName || "?").slice(0, 200), duration: dur,
+               thumbnail: "https://i.ytimg.com/vi/" + m[1] + "/hqdefault.jpg" });
+  }
+  return out;
+}
+async function fetchHost(host, q, ms) {
+  const ctl = new AbortController();
+  const t = setTimeout(() => ctl.abort(), ms);
+  try {
+    const r = await fetch(host + "/search?q=" + encodeURIComponent(q) + "&filter=videos", { signal: ctl.signal });
+    if (!r.ok) return [];
+    return normItems((await r.json()).items);
+  } catch (e) { return []; } finally { clearTimeout(t); }
+}
+async function doSearch() {
+  const q = $("q").value.trim();
+  if (!q) return;
+  const btn = $("search");
+  btn.disabled = true;
+  resultsEl.innerHTML = "";
+  countEl.textContent = "Searching…";
+  let results = [], via = "";
+  for (const h of SEARCH_HOSTS) {
+    results = await fetchHost(h, q, 10000);
+    if (results.length) { via = "browser ↔ " + h; break; }
+  }
+  if (!results.length) {
+    // bot proxy fallback — still no leaving this page
+    try {
+      const r = await fetch("/api/search?q=" + encodeURIComponent(q));
+      const j = await r.json();
+      if (j && j.ok) { results = j.results; via = "via bot proxy"; }
+      else { countEl.textContent = "❌ " + ((j && j.error) || r.status); }
+    } catch (e) { countEl.textContent = "❌ Search failed on all backends. Paste a link below instead."; }
+  }
+  countEl.textContent = results.length ? results.length + " results (" + via + ") — tap to preview, ➕ to queue." : countEl.textContent;
+  render(results);
+  btn.disabled = false;
+}
+function el(tag, cls, text) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text !== undefined) e.textContent = text;
+  return e;
+}
+function render(results) {
+  resultsEl.innerHTML = "";
+  if (!results.length && !countEl.textContent.startsWith("❌")) {
+    resultsEl.appendChild(el("div", "meta", "No results. Try 'artist - title'."));
+    return;
+  }
+  for (const m of results) {
+    const card = el("div", "yt-card");
+    const img = document.createElement("img");
+    img.src = m.thumbnail; img.alt = ""; img.loading = "lazy";
+    const info = el("div", "yt-info");
+    info.appendChild(el("div", "yt-title", m.title));
+    info.appendChild(el("div", "yt-sub", m.uploader + " • " + fmtDur(m.duration)));
+    const add = el("button", "yt-add good", "➕");
+    add.title = "Queue on bot";
+    add.onclick = (ev) => { ev.stopPropagation(); preview(m); queueSelected(); };
+    card.onclick = () => preview(m);
+    card.appendChild(img); card.appendChild(info); card.appendChild(add);
+    resultsEl.appendChild(card);
+  }
+}
+$("search").onclick = doSearch;
+$("q").addEventListener("keydown", (e) => { if (e.key === "Enter") doSearch(); });
+
+// ---- paste-a-link path ----
+$("preview").onclick = () => {
+  const id = videoIdFromInput($("url").value);
+  if (!id) { setStatus("❌ Could not find a video ID in that text."); return; }
+  preview({ videoId: id, title: "YouTube video " + id, uploader: "?",
+            duration: 0, thumbnail: "https://i.ytimg.com/vi/" + id + "/hqdefault.jpg" });
+  setStatus("Preview loaded — press ➕ Queue on bot to play it.");
+};
+
+// ---- queue ----
+async function queueSelected() {
+  if (!selected) return;
+  if (!token) { setStatus("❌ Missing token. Re-run /music mode:web."); return; }
+  setStatus("⏳ Sending to bot…");
+  try {
+    const r = await fetch("/api/pick", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token, ...selected }),
+    });
+    const j = await r.json();
+    setStatus((j.ok ? "✅ " : "❌ ") + (j.message || j.error || r.status));
+  } catch (e) { setStatus("❌ Network error: " + e); }
+}
+$("queue").onclick = queueSelected;
+
+// ---- bot sync: pause state + timestamp, polled ----
+let lastNow = null;
+async function pollNow() {
+  if (!token) return;
+  try {
+    const r = await fetch("/api/now?token=" + encodeURIComponent(token));
+    const j = await r.json();
+    if (!j || !j.ok) return;
+    lastNow = j.now;
+    renderBot(j.now);
+  } catch (e) {}
+}
+function renderBot(n) {
+  const titleEl = $("botnow"), barEl = $("botbar"), timeEl = $("bottime"), tgl = $("bottoggle");
+  if (!n || !n.playing) {
+    titleEl.textContent = "🔊 Bot is idle — queue something below.";
+    barEl.style.width = "0%";
+    timeEl.textContent = "";
+    tgl.textContent = "⏸ Pause";
+    tgl.disabled = true;
+    $("botskip").disabled = true;
+    return;
+  }
+  tgl.disabled = false;
+  $("botskip").disabled = false;
+  const icon = n.paused ? "⏸" : "▶";
+  titleEl.textContent = icon + " " + n.title;
+  const total = n.duration || 0;
+  // while paused the bot freezes elapsed; between polls, advance locally if playing
+  let el = n.elapsed || 0;
+  if (!n.paused && total && el < total) el = Math.min(total, el + 1);
+  if (total) {
+    barEl.style.width = Math.min(100, el / total * 100) + "%";
+    timeEl.textContent = fmtDur(el) + " / " + fmtDur(total) + " • up next: " + n.queue_len
+      + " • loop " + n.loop + " • vol " + n.volume + "%";
+  } else {
+    barEl.style.width = "0%";
+    timeEl.textContent = "🔴 LIVE • up next: " + n.queue_len;
+  }
+  tgl.textContent = n.paused ? "▶ Resume" : "⏸ Pause";
+  // stash ticking value so the bar moves smoothly between polls
+  n.elapsed = el;
+}
+async function control(action) {
+  if (!token) return;
+  try {
+    const r = await fetch("/api/control", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token, action }),
+    });
+    const j = await r.json();
+    if (!j.ok) setStatus("❌ " + (j.message || j.error || r.status));
+  } catch (e) { setStatus("❌ Network error: " + e); }
+  pollNow();
+}
+$("bottoggle").onclick = () => control("toggle");
+$("botskip").onclick = () => control("skip");
+setInterval(pollNow, 2000);
+
+// ---- session header ----
+(async () => {
+  if (!token) { ctxEl.textContent = "Missing ?token — run /music mode:web in Discord."; return; }
+  // autofocus search so it's one tap to start typing
+  $("q").focus();
+  pollNow();
+  try {
+    const r = await fetch("/api/session?token=" + encodeURIComponent(token));
+    const j = await r.json();
+    ctxEl.textContent = j.ok ? ("Server: " + j.guild + " • link for " + j.user + " • expires in " + j.expires_in + "s")
+                             : ("❌ " + (j.error || r.status));
+  } catch (e) { ctxEl.textContent = "❌ Cannot reach bot web server."; }
+})();
+</script>
+</body>
+</html>

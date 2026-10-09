@@ -13,6 +13,7 @@ A resilient Discord music bot — slash commands + persistent panel, YouTube via
 - **Slash + panel:** `/music` opens a persistent control panel (Add / Pause / Skip / Stop / Shuffle / Loop / Vol / Queue / Autoplay / Refresh). Also `/play /search /playlist /queue /nowplaying /skip /pause /resume /stop /remove /clear /shuffle /loop /volume /autoplay /join /leave`.
 - **Autoplay ("Up next"):** when the queue runs low, the bot silently queries YouTube's radio mix (`list=RD<id>`) seeded from the playing track and tops up the queue so music never stops — the closest thing to YouTube in a browser. ON by default; toggle with `/autoplay` or the panel's `🔮 Autoplay` button.
 - **User steering:** manual picks (`/play`, search picker, panel ➕ Add) always slot **before** the autoplay tail so your pick plays next instead of being buried behind 25 recommendations. Skipped / removed / cleared tracks are remembered and never re-suggested.
+- **Browser picker (panel 🌐 Picker button):** the panel hands you a link to a page containing in-page YouTube search + a real embedded player with synced pause/timestamp. Zero-config public link via Cloudflare quick tunnel; search load stays off the bot's IP.
 - **Fast search:** text → ranked top-5 picker (prefers official/short over mixes/lives) with lazy deep resolve; links/playlists resolve directly.
 - **Playlists with pagination:** fetches 25 tracks initially, with an interactive `📥 Load next 25` button on the message to load subsequent batches on demand without hitting YouTube IP bans.
 - **Stay-in-voice:** bot stays until explicit leave; 12h idle safety net only (`INACTIVITY_TIMEOUT`).
@@ -67,7 +68,7 @@ python bot.py
 
 | Command | What it does |
 |---|---|
-| `/music` | Open the persistent panel (one per server, survives restarts) |
+| `/music [mode]` | Open the persistent panel — 🌐 Picker button for the browser YouTube picker, right alongside the classic controls |
 | `/play <query>` | URL → plays; `list=` → first 25 of playlist; text → picker |
 | `/search <text>` | Top-5 YouTube picks |
 | `/playlist <url>` | Queue first 25 of playlist |
@@ -126,8 +127,11 @@ If a `/playlist` shows `910× Video unavailable` + `rate-limited for up to an ho
 .
 ├── bot.py              # startup, login retry, slash sync, interaction logging
 ├── cogs/
-│   ├── music.py        # queue, panel, search, voice heal, play/next, skip
+│   ├── music.py        # queue, panel, search, voice heal, play/next, skip (+ web picker sessions)
 │   └── youtube.py      # yt-dlp opts + FFmpeg flags
+├── web/
+│   ├── server.py       # picker sidecar (/pick, /api/session, /api/pick)
+│   └── pick.html       # embedded YouTube player UI (client does discovery)
 ├── compose.yaml        # music-bot service + dns
 ├── Dockerfile          # python:3.13-slim + ffmpeg
 └── requirements.txt

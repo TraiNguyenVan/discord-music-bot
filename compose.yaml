@@ -9,3 +9,6 @@ services:
       - 172.19.0.1
       - 1.1.1.1
     # cookies.txt is read from the project dir if present (see .env.example)
+    # picker web UI (/music mode:web) — map WEB_PORT so browsers can reach /pick
+    ports:
+      - "${WEB_PORT:-8765}:${WEB_PORT:-8765}"
