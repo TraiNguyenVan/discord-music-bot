@@ -114,6 +114,14 @@
     display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
   .np-sub{margin:0;color:var(--sub);font-size:.9rem;overflow-wrap:anywhere}
 
+  /* who's listening: avatar stack — circular frames for people */
+  .listeners{display:flex;align-items:center;gap:10px;margin-top:12px;min-width:0}
+  .avstack{display:flex;flex-shrink:0}
+  .avstack img{width:22px;height:22px;border-radius:50%;object-fit:cover;background:#3a3a3a;
+    border:2px solid var(--panel);margin-left:-6px}
+  .avstack img:first-child{margin-left:0}
+  .lnames{color:var(--faint);font-size:.78rem;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
   .np-track{height:6px;border-radius:3px;background:rgba(255,255,255,.14);overflow:hidden;margin-top:16px}
   #np-fill{height:100%;background:var(--green);transform:scaleX(0);transform-origin:0 50%;
     transition:transform .25s linear}
@@ -273,13 +281,17 @@
   .qtools{display:flex;gap:6px}
   .qtools .pill{min-height:34px;padding:6px 13px;font-size:.72rem}
   #qlist{margin-top:4px}
-  .qrow{display:grid;grid-template-columns:26px minmax(0,1fr) 30px;gap:10px;align-items:center;
+  .qrow{display:grid;grid-template-columns:26px minmax(0,1fr) 38px 38px;gap:10px;align-items:center;
     padding:9px 4px;border-bottom:1px solid var(--line-weak);content-visibility:auto;contain-intrinsic-size:64px;
     border-radius:6px;transition:background-color .15s}
   .qrow:hover{background:var(--row-hover)}
   .qnum{color:var(--faint);font:600 .82rem var(--sans);font-variant-numeric:tabular-nums;text-align:right;min-width:2ch}
   .qrow .rtitle{font-size:.88rem;-webkit-line-clamp:2}
   .qrow .rsub{font-size:.74rem}
+  .qplay{width:38px;height:38px;display:grid;place-items:center;border-radius:50%;color:var(--faint);
+    transition:color .15s,background-color .15s}
+  .qplay:hover{color:var(--green);background:#232323}
+  .qplay svg{width:15px;height:15px;translate:1px 0}
   .rm{width:38px;height:38px;display:grid;place-items:center;border-radius:50%;color:var(--faint);
     transition:color .15s,background-color .15s}
   .rm:hover{color:var(--text);background:#282828}
@@ -384,6 +396,11 @@
       </p>
       <h1 class="np-title" id="dk-title">Nothing playing yet</h1>
       <p class="np-sub" id="dk-sub">Search below, audition muted, and add — the bot starts it.</p>
+
+      <div class="listeners" id="listeners" hidden>
+        <span class="avstack" id="avstack" aria-hidden="true"></span>
+        <span class="lnames" id="lnames"></span>
+      </div>
 
       <div class="np-track" id="np-track" role="progressbar" aria-label="Playback progress"
            aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
@@ -552,6 +569,7 @@ const token = params.get("token") || "";
 const $ = (id) => document.getElementById(id);
 const REDUCED = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 const X_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none"><path d="M6 6l12 12M18 6 6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>';
+const PLAY_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8.2 5.4v13.2L19 12z" fill="currentColor"/></svg>';
 
 /* ---------- helpers ---------- */
 // No emoji ever reaches the interface — not ours, not the bot's, not YouTube's.
@@ -1033,8 +1051,29 @@ function setSkipDisabled(disabled) {
   $("mini-skip").disabled = disabled;
 }
 
+/* who's listening: humans in the bot's voice channel, per the bot snapshot */
+function renderListeners(n) {
+  const box = $("listeners");
+  const people = (n.listeners || []).filter(p => p && p.name);
+  if (!people.length) { box.hidden = true; return; }
+  box.hidden = false;
+  const stack = $("avstack");
+  stack.innerHTML = "";
+  people.slice(0, 5).forEach(p => {
+    if (!p.avatar) return;
+    const img = document.createElement("img");
+    img.src = p.avatar; img.alt = ""; img.width = 22; img.height = 22;
+    img.loading = "lazy"; img.decoding = "async";
+    stack.appendChild(img);
+  });
+  const names = people.slice(0, 3).map(p => noEmoji(p.name));
+  const rest = people.length - names.length;
+  $("lnames").textContent = rest > 0 ? names.join(", ") + ", +" + rest + " more" : names.join(", ");
+}
+
 function renderBot(n) {
   renderQueuePage(n);
+  renderListeners(n);
   const deck = $("deck");
   deck.classList.toggle("playing", !!n.playing);
   deck.classList.toggle("paused", !!(n.playing && n.paused));
@@ -1166,23 +1205,30 @@ function renderQueuePage(n) {
 function queueRow(index, title, duration, requester) {
   const row = document.createElement("div");
   row.className = "qrow";
+  const clean = noEmoji(title);
   const num = document.createElement("span");
   num.className = "qnum"; num.textContent = index;
   const tx = document.createElement("div");
   tx.className = "rtext";
   const t = document.createElement("span");
-  t.className = "rtitle"; t.textContent = noEmoji(title);
+  t.className = "rtitle"; t.textContent = clean;
   const s = document.createElement("span");
   s.className = "rsub";
   s.textContent = noEmoji(requester || "?") + (duration ? " · " + fmtDur(duration) : "");
   tx.append(t, s);
+  const qplay = document.createElement("button");
+  qplay.type = "button"; qplay.className = "qplay";
+  qplay.title = "Play now";
+  qplay.setAttribute("aria-label", "Play " + clean + " now");
+  qplay.innerHTML = PLAY_ICON;
+  qplay.onclick = () => control("jump", { index });
   const rm = document.createElement("button");
   rm.type = "button"; rm.className = "rm";
-  rm.setAttribute("aria-label", "Remove " + noEmoji(title) + " from the queue");
+  rm.setAttribute("aria-label", "Remove " + clean + " from the queue");
   rm.title = "Remove from queue";
   rm.innerHTML = X_ICON;
   rm.onclick = () => control("remove", { index });
-  row.append(num, tx, rm);
+  row.append(num, tx, qplay, rm);
   return row;
 }
 async function loadQueuePage(p) {

@@ -1041,14 +1041,24 @@ class Music(commands.Cog):
     def web_now(self, guild_id: int) -> dict:
         """Sync snapshot for the picker page (pause state + timestamp)."""
         snap = now_status(self.state(guild_id))
+        listeners: list[dict] = []
         try:
             guild = self.bot.get_guild(guild_id)
             vc = guild.voice_client if guild else None
             snap["connected"] = bool(vc is not None and vc.is_connected())
             snap["voice_channel"] = getattr(getattr(vc, "channel", None), "name", None)
+            # who's in the room with us — humans only, bots don't listen
+            ch = vc.channel if (vc is not None and vc.is_connected()) else None
+            if ch is not None:
+                for m in ch.members:
+                    if m.bot:
+                        continue
+                    listeners.append({"id": m.id, "name": m.display_name,
+                                      "avatar": str(m.display_avatar.url)})
         except Exception:
             snap["connected"] = False
             snap["voice_channel"] = None
+        snap["listeners"] = listeners[:50]
         return snap
 
     async def _web_member(self, guild_id: int, user_id: int):
@@ -1194,6 +1204,25 @@ class Music(commands.Cog):
                 await self._update_panel(guild_id)
                 return True, f"🗑 Removed **{t.title}**."
             return False, "Invalid index."
+        if action == "jump":
+            # play a queued track right now: move it to the head and skip.
+            # Reuses _do_skip so debounce/voice-heal/loop semantics stay identical.
+            if member is None:
+                return False, "User gone."
+            try:
+                index = int(params.get("index", 0))
+            except (TypeError, ValueError):
+                return False, "index must be a number."
+            if not (1 <= index <= len(st.queue)):
+                return False, "Invalid index."
+            track = st.queue.pop(index - 1)
+            st.queue.insert(0, track)
+            msg = await self._do_skip(guild, member)  # type: ignore
+            await self._update_panel(guild_id)
+            _event(guild_id, f"web-control jump index={index} title={track.title!r} -> {msg} by={user_id}")
+            if "Already skipping" in msg:
+                return True, f"⏭ **{track.title}** is up next."
+            return True, f"⏭ Playing **{track.title}** now."
         if action == "join":
             if member is None:
                 return False, "User gone."
