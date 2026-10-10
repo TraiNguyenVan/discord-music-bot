@@ -1,9 +1,10 @@
-"""Sidecar web UI: client-side YouTube picker with a real embedded player.
+"""Sidecar web UI: picker + player control panel.
 
-The browser does all YouTube discovery (search/browse/preview via the
-YouTube IFrame Player API). The bot only receives {videoId + metadata}
-via POST /api/pick and does a single deep yt-dlp resolve for voice.
-This keeps search/listing load off the bot's egress IP.
+The browser frontend (frontend/, React + TypeScript) is built to
+frontend/dist and served here at /pick; it talks to the /api/* routes
+below. The bot only receives {videoId + metadata} via POST /api/pick and
+does a single deep yt-dlp resolve for voice. This keeps search/listing
+load off the bot's egress IP.
 """
 
 from __future__ import annotations
@@ -18,6 +19,8 @@ from aiohttp import web
 VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
 _VID_IN_URL = re.compile(r"(?:[?&]v=|youtu\.be/|/shorts/)([A-Za-z0-9_-]{11})")
 WEB_DIR = Path(__file__).parent
+FRONTEND_INDEX = WEB_DIR.parent / "frontend" / "dist" / "index.html"
+FRONTEND_ASSETS = WEB_DIR.parent / "frontend" / "dist" / "assets"
 
 
 def _yt_fallback_on() -> bool:
@@ -42,8 +45,16 @@ def build_app(cog) -> web.Application:
         return web.json_response({"ok": True})
 
     async def pick_page(req):
-        # token is used by JS, not validated here so the page can show errors itself
-        return web.FileResponse(WEB_DIR / "pick.html")
+        # Serves the built React picker (frontend/dist). Token is used by JS,
+        # not validated here so the page can show errors itself.
+        if FRONTEND_INDEX.is_file():
+            # no-cache: the index references hashed assets that vanish on rebuild
+            return web.FileResponse(FRONTEND_INDEX, headers={"Cache-Control": "no-cache"})
+        return web.Response(
+            status=503,
+            text="Music picker UI is not built yet. Run: cd frontend && npm ci && npm run build",
+            content_type="text/plain",
+        )
 
     async def session_info(req):
         token = req.query.get("token", "")
@@ -237,6 +248,8 @@ def build_app(cog) -> web.Application:
 
     app.router.add_get("/healthz", health)
     app.router.add_get("/pick", pick_page)
+    if FRONTEND_ASSETS.is_dir():
+        app.router.add_static("/assets/", FRONTEND_ASSETS)
     app.router.add_get("/api/session", session_info)
     app.router.add_get("/api/config", search_config)
     app.router.add_get("/api/search", search_proxy)

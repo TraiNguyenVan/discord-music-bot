@@ -1,0 +1,277 @@
+/* Queue panel and phone queue sheet. */
+
+.queuecol {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: var(--pad);
+}
+
+.queue {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.qhead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.h-sect {
+  font-size: 0.95rem;
+  margin: 0;
+}
+
+.qcount {
+  color: var(--faint);
+  font-weight: 400;
+  font-size: 0.8rem;
+  margin-left: 6px;
+}
+
+.pill {
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  color: var(--text);
+  border-radius: 999px;
+  padding: 7px 14px;
+  font: inherit;
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  transition: border-color 150ms ease, color 150ms ease;
+}
+
+.pill:hover {
+  border-color: var(--green);
+}
+
+.pill:focus-visible {
+  outline: 2px solid var(--green);
+  outline-offset: 2px;
+}
+
+.pill:disabled {
+  color: var(--faint);
+  cursor: default;
+}
+
+/* armed state of the two-tap confirm */
+.pill--armed {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
+.qlist {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-height: 40px;
+}
+
+.empty {
+  margin: 0;
+  color: var(--faint);
+  font-size: 0.85rem;
+  padding: 10px 0;
+}
+
+.nowline {
+  margin: 0;
+  color: var(--green);
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+
+.morenote {
+  margin: 0;
+  color: var(--faint);
+  font-size: 0.8rem;
+}
+
+/* queue rows: comfortable spacing, touch-friendly targets */
+.qrow {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr) 36px 36px;
+  gap: 10px;
+  align-items: center;
+  padding: 8px;
+  border-radius: var(--radius-sm);
+  transition: background 150ms ease;
+}
+
+.qrow:hover {
+  background: var(--row-hover);
+}
+
+.qnum {
+  color: var(--faint);
+  font-size: 0.8rem;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.rtext {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.rtitle {
+  font-size: 0.88rem;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rsub {
+  font-size: 0.76rem;
+  color: var(--faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.qplay,
+.rm {
+  width: 36px;
+  height: 36px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line);
+  background: var(--panel-2);
+  color: var(--sub);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: border-color 150ms ease, color 150ms ease;
+}
+
+.qplay:hover,
+.rm:hover {
+  border-color: var(--green);
+  color: var(--text);
+}
+
+.rm:hover {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.qplay:focus-visible,
+.rm:focus-visible {
+  outline: 2px solid var(--green);
+  outline-offset: 2px;
+}
+
+.qplay:disabled,
+.rm:disabled {
+  color: var(--faint);
+  cursor: default;
+}
+
+.pager {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.qinfo {
+  font-size: 0.78rem;
+  color: var(--faint);
+}
+
+.qmore {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+/* sheet grip: phone only */
+.sheet-grip {
+  display: none;
+}
+
+.qscrim {
+  position: fixed;
+  inset: 0;
+  z-index: 39;
+  background: rgba(0, 0, 0, 0.5);
+}
+
+@media (max-width: 680px) {
+  /* the mini player moves to the bottom bar on phones */
+  .mini {
+    display: none !important;
+  }
+
+  /* the queue column becomes a bottom sheet opened from the bar */
+  .queuecol {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    top: auto;
+    z-index: 40;
+    max-height: 82vh;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    border-bottom: 0;
+    border-radius: 18px 18px 0 0;
+    padding: 0 14px calc(14px + env(safe-area-inset-bottom));
+    box-shadow: 0 -18px 50px rgba(0, 0, 0, 0.55);
+    transform: translateY(104%);
+    visibility: hidden;
+    transition: transform 0.28s ease, visibility 0s linear 0.28s;
+  }
+
+  body.qsheet .queuecol {
+    transform: translateY(0);
+    visibility: visible;
+    transition: transform 0.28s ease;
+  }
+
+  body.qsheet {
+    overflow: hidden;
+  }
+
+  .sheet-grip {
+    display: flex;
+    position: sticky;
+    top: 0;
+    z-index: 3;
+    justify-content: flex-end;
+    align-items: center;
+    padding: 8px 0 4px;
+    margin: 0 -14px;
+    padding-right: 14px;
+    background: linear-gradient(var(--panel) 65%, transparent);
+  }
+
+  .sheet-grip::before {
+    content: '';
+    position: absolute;
+    left: 50%;
+    top: 15px;
+    width: 36px;
+    height: 4px;
+    border-radius: 2px;
+    background: #3a3a3a;
+    translate: -50% 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .queuecol,
+  .qrow {
+    transition: none;
+  }
+}

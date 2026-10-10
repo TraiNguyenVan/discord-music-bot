@@ -1,0 +1,480 @@
+/* Find music: search + suggestions, link preview, the muted audition
+ * player, track cards, related tracks, and quick add. Mirror of the legacy
+ * picker's discovery column, on the shared tokens. */
+
+/* ---- inputs and forms ---- */
+.field {
+  width: 100%;
+  min-width: 0;
+  min-height: 48px;
+  padding: 12px 16px;
+  background: var(--field);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--text);
+  font: inherit;
+}
+
+.field::placeholder {
+  color: var(--faint);
+}
+
+.field:hover {
+  border-color: rgba(255, 255, 255, 0.2);
+}
+
+.field:focus {
+  border-color: var(--green);
+  outline: none;
+}
+
+.field:focus-visible {
+  outline: 2px solid var(--green);
+  outline-offset: 2px;
+}
+
+.findbar,
+.linkbar,
+.addbar {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 10px;
+}
+
+.findbar {
+  margin-top: 12px;
+}
+
+.linkbar {
+  margin-top: 10px;
+}
+
+.addbar {
+  margin-top: 12px;
+}
+
+.searchwrap {
+  position: relative;
+  min-width: 0;
+}
+
+.searchwrap .field {
+  padding-left: 44px;
+}
+
+.sicon {
+  position: absolute;
+  left: 15px;
+  top: 50%;
+  translate: 0 -50%;
+  color: var(--faint);
+  pointer-events: none;
+}
+
+/* suggestions dropdown */
+.sugg {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: calc(100% + 6px);
+  z-index: 12;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  overflow: hidden;
+  padding: 4px;
+  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.55);
+}
+
+.sugg [role='option'] {
+  padding: 11px 14px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: 0.88rem;
+  color: var(--sub);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sugg [role='option']:hover,
+.sugg [role='option']:focus {
+  background: #282828;
+  color: var(--text);
+  outline: none;
+  box-shadow: inset 2px 0 0 var(--green);
+}
+
+.count {
+  margin: 10px 4px 0;
+  color: var(--faint);
+  font-size: 0.78rem;
+  min-height: 1.2em;
+}
+
+/* ---- cta (green) + small variant ---- */
+.cta {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 44px;
+  padding: 9px 22px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--green);
+  color: #04150a;
+  font: inherit;
+  font-size: 0.84rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: transform 120ms ease, background-color 150ms ease;
+}
+
+.cta:hover:not(:disabled) {
+  transform: scale(1.03);
+  background: var(--green-hover);
+}
+
+.cta:active:not(:disabled) {
+  transform: scale(0.98);
+}
+
+.cta:focus-visible {
+  outline: 2px solid var(--green);
+  outline-offset: 2px;
+}
+
+.cta:disabled {
+  background: var(--green);
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.cta.small {
+  min-height: 40px;
+  padding: 7px 16px;
+  font-size: 0.78rem;
+}
+
+/* ---- audition: muted preview, never fights the room ---- */
+.aud {
+  margin-top: 16px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 18px;
+}
+
+.aud-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.aud-note {
+  display: block;
+  color: var(--faint);
+  font-size: 0.72rem;
+  font-weight: 500;
+}
+
+.aud-slot {
+  position: relative;
+  aspect-ratio: 16 / 9;
+  border-radius: 10px;
+  overflow: hidden;
+  background: #000;
+  border: 1px solid var(--line);
+}
+
+/* The mount div is replaced by the player iframe; both fill the 16:9 slot. */
+.aud-slot iframe,
+.aud-slot > div {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  border: 0;
+}
+
+.aud-hint {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  margin: 0;
+  padding: 24px;
+  text-align: center;
+  color: var(--faint);
+  font-size: 0.9rem;
+}
+
+.aud-slot.on .aud-hint {
+  display: none;
+}
+
+.aud-meta {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-top: 14px;
+}
+
+.aud-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.aud-title {
+  font-size: 1rem;
+  font-weight: 600;
+  line-height: 1.35;
+  margin: 0;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.aud-sub {
+  margin: 3px 0 0;
+  color: var(--faint);
+  font-size: 0.8rem;
+}
+
+/* ---- track cards: the row auditions, the side button adds ---- */
+.rowwrap {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  border-bottom: 1px solid var(--line-weak);
+  border-radius: var(--radius-sm);
+  transition: background-color 150ms ease;
+}
+
+.rowwrap:hover {
+  background: var(--row-hover);
+}
+
+.rowwrap:last-child {
+  border-bottom: 0;
+}
+
+.row {
+  display: flex;
+  gap: 14px;
+  align-items: center;
+  padding: 9px 10px;
+  min-height: 80px;
+  min-width: 0;
+  text-align: left;
+  width: 100%;
+  background: none;
+  border: 0;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.row:focus-visible {
+  outline: 2px solid var(--green);
+  outline-offset: 2px;
+}
+
+/* track cards clamp to two lines (queue rows stay single-line) */
+.row .rtext {
+  flex: 1;
+}
+
+.row .rtitle {
+  font-size: 0.92rem;
+  font-weight: 500;
+  line-height: 1.35;
+  white-space: normal;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow-wrap: anywhere;
+}
+
+.row .rsub {
+  font-size: 0.78rem;
+  margin-top: 3px;
+}
+
+.rthumb {
+  position: relative;
+  width: clamp(104px, 13vw, 136px);
+  aspect-ratio: 16 / 9;
+  flex-shrink: 0;
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--field);
+  border: 1px solid var(--line-weak);
+}
+
+.rthumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.rdur {
+  position: absolute;
+  right: 5px;
+  bottom: 5px;
+  background: rgba(0, 0, 0, 0.82);
+  color: #fff;
+  font-size: 0.66rem;
+  font-variant-numeric: tabular-nums;
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+
+.playov {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: rgba(0, 0, 0, 0.36);
+  opacity: 0;
+  transition: opacity 150ms ease;
+}
+
+.playov span {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: var(--green);
+  color: #04150a;
+  display: grid;
+  place-items: center;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
+}
+
+.row:hover .playov,
+.row:focus-visible .playov {
+  opacity: 1;
+}
+
+@media (hover: none) {
+  .playov {
+    display: none;
+  }
+}
+
+.radd {
+  margin: 0 6px 0 2px;
+  align-self: center;
+}
+
+@media (hover: hover) {
+  .radd {
+    opacity: 0;
+    translate: 0 4px;
+    transition: opacity 150ms ease, translate 150ms ease;
+  }
+
+  .rowwrap:hover .radd,
+  .radd:focus-visible {
+    opacity: 1;
+    translate: 0 0;
+  }
+}
+
+/* ---- quick add lives above the queue, separated like the legacy card ---- */
+.quickadd {
+  padding-bottom: 16px;
+  margin-bottom: 16px;
+  border-bottom: 1px solid var(--line-weak);
+}
+
+/* ---- responsive ---- */
+@media (max-width: 760px) {
+  .rthumb {
+    width: 104px;
+  }
+
+  .aud-meta {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+  }
+}
+
+@media (max-width: 680px) {
+  /* search: one box for searching and pasted links, button inside the field */
+  .linkbar {
+    display: none;
+  }
+
+  .findbar {
+    grid-template-columns: 1fr;
+    position: relative;
+  }
+
+  .findbar .cta {
+    position: absolute;
+    right: 7px;
+    top: 50%;
+    translate: 0 -50%;
+    width: auto;
+    min-height: 36px;
+    padding: 6px 14px;
+    font-size: 0.76rem;
+  }
+
+  .searchwrap .field {
+    padding-right: 96px;
+  }
+}
+
+@media (max-width: 560px) {
+  .findbar,
+  .linkbar,
+  .addbar {
+    grid-template-columns: 1fr;
+  }
+
+  .cta {
+    width: 100%;
+  }
+
+  .findbar .cta {
+    width: auto;
+  }
+
+  .row {
+    gap: 10px;
+  }
+
+  .rthumb {
+    width: 96px;
+  }
+}
+
+@media (max-width: 400px) {
+  .rthumb {
+    width: 82px;
+  }
+
+  .row .rtitle {
+    font-size: 0.86rem;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rowwrap,
+  .playov,
+  .radd,
+  .cta {
+    transition: none;
+  }
+}

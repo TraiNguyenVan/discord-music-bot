@@ -55,12 +55,16 @@ docker compose up --build -d
 docker compose logs -f --tail 50
 ```
 
-Uses host `dnsmasq` cache (`172.19.0.1`) + fallback `1.1.1.1`, v4-only (`filter-AAAA`), to survive stalls.
+Uses host `dnsmasq` cache (`172.19.0.1`) + fallback `1.1.1.1`, v4-only (`filter-AAAA`), to survive stalls. The image builds the web picker UI (`frontend/`) in a Node stage — no local Node needed.
 
 ### 4) Run locally
 
 ```sh
 pip install -r requirements.txt
+
+# build the web picker UI once (React + Vite) — /pick serves frontend/dist/
+cd frontend && npm ci && npm run build && cd ..
+
 python bot.py
 ```
 
@@ -121,6 +125,21 @@ If a `/playlist` shows `910× Video unavailable` + `rate-limited for up to an ho
 - `Already playing audio.` / queue drains on double skip → fixed by serialize on `play_lock` + `SKIP_DEBOUNCE_SEC`.
 - `Sign in to confirm you're not a bot` / `429` → export `cookies.txt` from your browser (yt-dlp wiki) and `docker compose up --build -d` again.
 
+## Web picker UI (frontend/)
+
+The `/music` 🌐 Picker link opens a React + TypeScript single-page app, served by the bot's aiohttp sidecar at `/pick` (from `frontend/dist/`). Same dark panel UX: live now-playing + transport, queue with pagination, in-page search with in-page auditions, quick add. It talks to the same `/api/*` routes — the Python side is unchanged.
+
+```sh
+cd frontend
+npm ci              # install deps
+npm run dev         # dev server on :5173 (proxies /api → aiohttp on WEB_PORT, default 8765)
+npm test            # Vitest + Testing Library suite
+npm run typecheck   # tsc --noEmit
+npm run build       # production bundle → frontend/dist/, served at /pick
+```
+
+Outside Docker, build once before `python bot.py`. A stale `frontend/dist` makes `/pick` return an actionable 503.
+
 ## Project structure
 
 ```
@@ -130,10 +149,16 @@ If a `/playlist` shows `910× Video unavailable` + `rate-limited for up to an ho
 │   ├── music.py        # queue, panel, search, voice heal, play/next, skip (+ web picker sessions)
 │   └── youtube.py      # yt-dlp opts + FFmpeg flags
 ├── web/
-│   ├── server.py       # picker sidecar (/pick, /api/session, /api/pick)
-│   └── pick.html       # embedded YouTube player UI (client does discovery)
+│   ├── server.py       # picker sidecar (/pick → frontend/dist, /api/session, /api/pick, ...)
+│   ├── search.py       # Piped/Invidious discovery + suggestions
+│   └── tunnel.py       # Cloudflare quick tunnel
+├── frontend/           # React + TS + Vite web picker UI
+│   └── src/            # components, hooks, lib, styles + Vitest suite
+├── tests/
+│   ├── queue_sim.py    # backend regression harness (queue/autoplay scenarios)
+│   └── web_smoke.py    # web sidecar + built-frontend integration smoke
 ├── compose.yaml        # music-bot service + dns
-├── Dockerfile          # python:3.13-slim + ffmpeg
+├── Dockerfile          # node stage (UI build) + python:3.13-slim + ffmpeg + cloudflared
 └── requirements.txt
 ```
 

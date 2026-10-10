@@ -1,0 +1,36 @@
+/* Design tokens — mirrored from the legacy web/pick.html palette so the
+ * migrated frontend keeps the same dark theme and green accent. */
+:root {
+  color-scheme: dark;
+
+  /* surfaces */
+  --bg: #0a0a0a;
+  --panel: #131313;
+  --panel-2: #1a1a1a;
+  --row-hover: #1f1f1f;
+  --field: #0d0d0d;
+
+  /* lines */
+  --line: rgba(255, 255, 255, 0.09);
+  --line-weak: rgba(255, 255, 255, 0.055);
+
+  /* text */
+  --text: #ffffff;
+  --sub: #b3b3b3;
+  --faint: #8f8f8f;
+
+  /* accent — green for function (play/progress/active) */
+  --green: #1ed760;
+  --green-hover: #3ce477;
+  --danger: #ff6b81;
+
+  /* typography */
+  --sans: 'Poppins', 'Segoe UI', system-ui, sans-serif;
+
+  /* layout */
+  --radius: 12px;
+  --radius-sm: 8px;
+  --pad: 16px;
+  --max-width: 720px;
+  --bar-h: 60px;
+}

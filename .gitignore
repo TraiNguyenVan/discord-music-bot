@@ -9,3 +9,6 @@ data/
 .DS_Store
 .venv/
 .firecrawl/
+frontend/node_modules/
+frontend/dist/
+
