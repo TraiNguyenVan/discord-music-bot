@@ -2,10 +2,10 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="robots" content="noindex">
 <meta name="theme-color" content="#0a0a0a">
-<meta name="description" content="Queue music for your Discord voice channel — search, audition, and steer playback from any device.">
+<meta name="description" content="Queue music for your Discord voice channel — search, preview, and steer playback from any device.">
 <title>Shared Queue — pick music for your channel</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23121212'/%3E%3Cpath d='M26 42.5V23.2l15-3.4v16.8' fill='none' stroke='%231ed760' stroke-width='4' stroke-linecap='round' stroke-linejoin='round'/%3E%3Ccircle cx='23.5' cy='42.5' r='4.5' fill='%231ed760'/%3E%3Ccircle cx='38.5' cy='36.6' r='4.5' fill='%231ed760'/%3E%3C/svg%3E">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -77,7 +77,7 @@
   .tmeta{margin-left:auto;display:flex;align-items:center;gap:12px;min-width:0}
   .rail-meta{margin:0;color:var(--faint);font-size:.78rem;min-width:0;max-width:46vw;
     overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-  #h-timer{color:var(--green)}
+  #h-timer{color:var(--green);margin-left:6px}
   #h-timer.urgent{color:var(--danger)}
 
   /* mini player — appears once the hero scrolls off (Spotify-mobile pattern) */
@@ -97,8 +97,10 @@
   .hero-art img{width:100%;height:100%;object-fit:cover}
   .hero-art svg{width:38%;height:38%;color:#2e2e2e}
   .hero-main{min-width:0;display:flex;flex-direction:column}
+  .hero-bottom{grid-column:2;min-width:0}
 
   .np-state{display:flex;align-items:center;gap:9px;margin:0 0 8px;font-size:.76rem;font-weight:600;color:var(--sub)}
+  #dk-state{white-space:nowrap}
   .eq{display:none;align-items:flex-end;gap:2.5px;height:13px;flex-shrink:0}
   .deck.playing .eq{display:inline-flex}
   .eq span{width:3px;height:13px;border-radius:2px;background:var(--green);
@@ -225,7 +227,8 @@
   /* audition: muted preview, never fights the room */
   .aud{margin-top:16px;background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:18px;
     scroll-margin-top:calc(var(--bar-h) + 16px)}
-  .aud-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px}
+  .aud-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;flex-wrap:wrap;gap:6px}
+  .aud-note{display:block;color:var(--faint);font-size:.72rem;font-weight:500}
   .aud-slot{position:relative;aspect-ratio:16/9;border-radius:10px;overflow:hidden;background:#000;
     border:1px solid var(--line)}
   .aud-slot iframe,.aud-slot #yt{position:absolute;inset:0;width:100%;height:100%;border:0}
@@ -310,6 +313,39 @@
   .footbtn:hover{background:#262626;border-color:rgba(255,255,255,.2)}
   .footbtn svg{width:18px;height:18px}
 
+  /* ---- phone bottom bar: the mini player lives here, not in the top bar ---- */
+  #mbar{display:none;position:fixed;left:0;right:0;bottom:0;z-index:32;align-items:center;gap:4px;
+    background:rgba(17,17,17,.97);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
+    border-top:1px solid var(--line);padding:10px 10px calc(10px + env(safe-area-inset-bottom))}
+  #mprog{position:absolute;top:-1px;left:0;width:100%;height:2px;background:var(--green);
+    transform:scaleX(0);transform-origin:0 50%;pointer-events:none}
+  #mbody{flex:1;min-width:0;display:flex;align-items:center;gap:10px;padding:6px 8px;border-radius:10px;
+    text-align:left;transition:background-color .15s}
+  #mbody:hover{background:var(--row-hover)}
+  #mbody:focus-visible{outline:2px solid var(--green);outline-offset:2px}
+  #m-art{width:44px;height:44px;border-radius:6px;object-fit:cover;background:var(--panel-2);flex-shrink:0}
+  #m-disc{width:44px;height:44px;border-radius:6px;background:var(--field);border:1px solid var(--line-weak);
+    display:grid;place-items:center;color:#2e2e2e;flex-shrink:0}
+  #m-disc svg{width:20px;height:20px}
+  #m-txt{min-width:0;display:flex;flex-direction:column;gap:1px}
+  #m-title{font-size:.84rem;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  #m-artist{font-size:.72rem;color:var(--faint);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  #m-play,#m-skip{width:44px;height:44px;flex-shrink:0}
+  #m-queue{display:inline-flex;align-items:center;gap:7px;min-height:40px;padding:8px 13px;border-radius:999px;
+    border:1px solid var(--line);color:var(--sub);font-size:.72rem;font-weight:600;flex-shrink:0;
+    transition:color .15s,border-color .15s,transform .12s}
+  #m-queue:hover{color:var(--text);border-color:rgba(255,255,255,.25)}
+  #m-queue:active{transform:scale(.97)}
+  #m-queue svg{width:14px;height:14px;flex-shrink:0}
+
+  /* ---- queue sheet: phone widths turn the queue column into a bottom sheet ---- */
+  #qscrim{display:none;position:fixed;inset:0;z-index:38;background:rgba(0,0,0,.55)}
+  .sheet-grip{display:none}
+  #qclose{width:44px;height:44px;border-radius:50%;display:grid;place-items:center;color:var(--sub);
+    transition:color .15s,background-color .15s}
+  #qclose:hover{color:var(--text);background:var(--panel-2)}
+  #qclose svg{width:17px;height:17px}
+
   /* ---- responsive ---- */
   @media(max-width:1020px){
     .cols{grid-template-columns:1fr;gap:26px}
@@ -325,8 +361,41 @@
     .wordmark{font-size:.85rem}
   }
   @media(max-width:680px){
-    #h-guild{display:none}
+    #h-guild{display:none}          /* guild + its separator hide together */
     .rail-meta{color:var(--sub)}
+    .topbar{margin-bottom:12px}     /* breathe: the player card no longer touches the bar */
+    .mini{display:none!important}   /* the mini player moves to the bottom bar on phones */
+    body.mbar-on #mbar{display:flex}
+    body.mbar-on{padding-bottom:calc(84px + env(safe-area-inset-bottom))}
+    body.mbar-on .footbtn{bottom:calc(78px + env(safe-area-inset-bottom))}   /* above the bar */
+    /* hero: art + text stay side by side; controls span the full card below */
+    .hero-bottom{grid-column:1 / -1}
+    .hero-art{align-self:center}
+    /* search: one box for searching and pasted links, button inside the field */
+    #linkform{display:none}
+    .findbar{grid-template-columns:1fr;position:relative}
+    #search{position:absolute;right:7px;top:50%;translate:0 -50%;width:auto;min-height:36px;
+      padding:6px 14px;font-size:.76rem}
+    .searchwrap .field{padding-right:96px}
+    /* queue rows: 44px touch targets, roomier spacing */
+    .qrow{grid-template-columns:24px minmax(0,1fr) 44px 44px;gap:12px}
+    .qplay,.rm{width:44px;height:44px}
+    /* the queue column becomes a bottom sheet opened from the bar */
+    #queuecol{position:fixed;left:0;right:0;bottom:0;top:auto;z-index:40;max-height:82vh;overflow-y:auto;
+      overscroll-behavior:contain;background:var(--panel);border:1px solid var(--line);border-bottom:0;
+      border-radius:18px 18px 0 0;padding:0 14px calc(14px + env(safe-area-inset-bottom));
+      box-shadow:0 -18px 50px rgba(0,0,0,.55);scroll-margin-top:0;
+      transform:translateY(104%);visibility:hidden;
+      transition:transform .28s ease,visibility 0s linear .28s}
+    body.qsheet #queuecol{transform:translateY(0);visibility:visible;transition:transform .28s ease}
+    #queuecol .qcard{background:transparent;border:0;padding:0;border-radius:0}
+    body.qsheet #qscrim{display:block}
+    body.qsheet{overflow:hidden}
+    .sheet-grip{display:flex;position:sticky;top:0;z-index:3;justify-content:flex-end;align-items:center;
+      padding:8px 0 4px;margin:0 -14px;padding-right:14px;
+      background:linear-gradient(var(--panel) 65%,transparent)}
+    .sheet-grip::before{content:"";position:absolute;left:50%;top:15px;width:36px;height:4px;
+      border-radius:2px;background:#3a3a3a;translate:-50% 0}
   }
   @media(max-width:560px){
     body{padding-inline:max(14px,env(safe-area-inset-left)) max(14px,env(safe-area-inset-right))}
@@ -371,7 +440,7 @@
   </div>
   <div class="tmeta">
     <p class="rail-meta" id="hmeta">Loading session…</p>
-    <button id="bt-voice" class="pill" type="button">Join voice</button>
+    <button id="bt-voice" class="pill" type="button">Connect bot</button>
   </div>
 </header>
 
@@ -395,13 +464,15 @@
         <span id="dk-extra">waiting for the bot…</span>
       </p>
       <h1 class="np-title" id="dk-title">Nothing playing yet</h1>
-      <p class="np-sub" id="dk-sub">Search below, audition muted, and add — the bot starts it.</p>
+      <p class="np-sub" id="dk-sub">Search below, preview muted, and add — the bot starts it.</p>
 
       <div class="listeners" id="listeners" hidden>
         <span class="avstack" id="avstack" aria-hidden="true"></span>
         <span class="lnames" id="lnames"></span>
       </div>
+    </div>
 
+    <div class="hero-bottom">
       <div class="np-track" id="np-track" role="progressbar" aria-label="Playback progress"
            aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
         <div id="np-fill"></div>
@@ -451,7 +522,7 @@
 
     <section class="col-a" id="find" aria-label="Find music">
       <h2 class="h-sect">Find music</h2>
-      <p class="sect-note">Tap a result to audition it muted, then add it for the room.</p>
+      <p class="sect-note">Tap a result to preview it muted on this device, then add it for the room.</p>
 
       <form id="searchform" class="findbar">
         <div class="searchwrap">
@@ -460,8 +531,9 @@
             <path d="M15.8 15.8 20.6 20.6" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/>
           </svg>
           <label class="sr" for="q">Search YouTube</label>
-          <input id="q" name="search" class="field" type="text" placeholder="Search songs, artists, or albums…"
-                 autocomplete="off" spellcheck="false" role="combobox" aria-autocomplete="list"
+          <input id="q" name="search" class="field" type="search" enterkeyhint="search"
+                 placeholder="Search songs, artists, or paste a YouTube link…" autocomplete="off"
+                 spellcheck="false" role="combobox" aria-autocomplete="list"
                  aria-controls="sugg" aria-expanded="false">
           <div id="sugg" role="listbox" aria-label="Search suggestions"></div>
         </div>
@@ -476,14 +548,14 @@
       </form>
       <p class="count tnum" id="count" role="status" aria-live="polite"></p>
 
-      <section class="aud" id="audition" aria-label="Audition player">
+      <section class="aud" id="audition" aria-label="Preview player">
         <div class="aud-head">
-          <h3 class="h-sub">Audition</h3>
+          <h3 class="h-sub">Preview on this device <span class="aud-note">(only you hear it)</span></h3>
           <button id="audmute" class="pill" type="button" aria-pressed="false" aria-label="Unmute preview">Muted</button>
         </div>
         <div class="aud-slot" id="aud-slot">
           <div id="yt"></div>
-          <p class="aud-hint">Tap a match to audition it here. Previews start muted, so they never fight the room.</p>
+          <p class="aud-hint">Tap a match to preview it here. Previews start muted and play only on this device, so they never fight the room.</p>
         </div>
         <div class="aud-meta">
           <div class="aud-text">
@@ -513,6 +585,11 @@
     </section>
 
     <aside class="col-b" id="queuecol" aria-label="Queue and quick add">
+      <div class="sheet-grip">
+        <button id="qclose" type="button" aria-label="Close the queue" title="Close">
+          <svg viewBox="0 0 24 24" aria-hidden="true" fill="none"><path d="M6 6l12 12M18 6 6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        </button>
+      </div>
       <div class="qcard">
         <section aria-label="Quick add">
           <h2 class="h-sect">Add for the room</h2>
@@ -562,6 +639,36 @@
 <button id="scrolltop" class="footbtn" type="button" aria-label="Back to top" title="Back to top" hidden>
   <svg viewBox="0 0 24 24" aria-hidden="true" fill="none"><path d="M12 19V5M5 12l7-7 7 7" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
 </button>
+
+<div id="mbar" role="region" aria-label="Playback bar">
+  <div id="mprog" aria-hidden="true"></div>
+  <button id="mbody" type="button" aria-label="Open the full player">
+    <img id="m-art" alt="" width="44" height="44" hidden>
+    <span id="m-disc" aria-hidden="true">
+      <svg viewBox="0 0 24 24" fill="none">
+        <path d="M9 18.5V6.2l10-2.3v10.6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+        <circle cx="6.5" cy="18.5" r="2.6" fill="currentColor"/>
+        <circle cx="16.5" cy="14.5" r="2.6" fill="currentColor"/>
+      </svg>
+    </span>
+    <span id="m-txt">
+      <span id="m-title">Nothing playing yet</span>
+      <span id="m-artist"></span>
+    </span>
+  </button>
+  <button id="m-play" class="iconbtn" type="button" aria-label="Play" title="Play" disabled>
+    <svg id="i-play3" viewBox="0 0 24 24" aria-hidden="true"><path d="M8.2 5.4v13.2L19 12z" fill="currentColor"/></svg>
+    <svg id="i-pause3" viewBox="0 0 24 24" aria-hidden="true" hidden><rect x="6.4" y="5" width="3.6" height="14" rx="1.2" fill="currentColor"/><rect x="14" y="5" width="3.6" height="14" rx="1.2" fill="currentColor"/></svg>
+  </button>
+  <button id="m-skip" class="iconbtn" type="button" aria-label="Skip to the next track" title="Skip" disabled>
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 6.2v11.6l8-5.8z" fill="currentColor"/><rect x="16" y="6.2" width="2.6" height="11.6" rx="1" fill="currentColor"/></svg>
+  </button>
+  <button id="m-queue" type="button" aria-label="Open the queue">
+    <svg viewBox="0 0 24 24" aria-hidden="true" fill="none"><path d="M4 6h16M4 12h10M4 18h7" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>
+    Queue · <span id="m-qcount" class="tnum">0</span>
+  </button>
+</div>
+<div id="qscrim" aria-hidden="true"></div>
 
 <script>
 const params = new URLSearchParams(location.search);
@@ -615,8 +722,10 @@ function setMeta(guild, user) {
   m.textContent = "";
   const g = document.createElement("span");
   g.id = "h-guild";
-  g.textContent = noEmoji(guild) + " — link for " + noEmoji(user);
-  m.append(g, " · ");
+  // the separator lives INSIDE the span: hiding the guild at phone widths
+  // hides the dot too — never a dangling "· live while in use"
+  g.textContent = noEmoji(guild) + " — link for " + noEmoji(user) + " ·";
+  m.append(g);
   const t = document.createElement("span");
   t.id = "h-timer"; t.className = "tnum";
   m.append(t);
@@ -626,10 +735,15 @@ function tickExpiry() {
   if (!t || !expiresAt) return;
   const left = expiresAt - Date.now();
   if (left <= 0) { t.textContent = "link expired"; t.classList.add("urgent"); return; }
-  const s = Math.ceil(left / 1000);
-  const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), sec = s % 60;
-  t.textContent = "ends " + (h ? h + ":" + String(m).padStart(2, "0") : m) + ":" + String(sec).padStart(2, "0");
-  if (left < 60000) t.classList.add("urgent");
+  // quiet until the final stretch: only the last ~5 minutes get a countdown
+  if (left <= 5 * 60 * 1000) {
+    const s = Math.ceil(left / 1000);
+    t.textContent = "Link expires in " + Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
+    t.classList.add("urgent");
+  } else {
+    t.textContent = "live while in use";
+    t.classList.remove("urgent");
+  }
 }
 setInterval(tickExpiry, 1000);
 
@@ -735,7 +849,6 @@ function preview(meta) {
     pendingId = meta.videoId; // API not here yet — load on ready
   }
   loadRelated(meta.videoId);
-  if (!REDUCED) $("audition").scrollIntoView({ behavior: "smooth", block: "nearest" });
 }
 function refreshAudition() {
   const t = $("aud-title"), s = $("aud-sub"), q = $("aud-queue");
@@ -844,8 +957,19 @@ async function raceRelated(videoId) {
 }
 const countEl = $("count");
 async function doSearch() {
-  const q = $("q").value.trim();
-  if (!q) return;
+  const raw = $("q").value.trim();
+  if (!raw) return;
+  // one box for both: a pasted link/ID previews directly instead of searching
+  const pastedId = videoIdFromInput(raw);
+  if (pastedId) {
+    preview({
+      videoId: pastedId, title: "YouTube video " + pastedId, uploader: "?", duration: 0,
+      thumbnail: "https://i.ytimg.com/vi/" + pastedId + "/hqdefault.jpg",
+    });
+    setStatus("Preview loaded — add it to the queue when it feels right.");
+    return;
+  }
+  const q = raw;
   const btn = $("search");
   btn.disabled = true;
   countEl.textContent = "Searching…";
@@ -1031,13 +1155,21 @@ async function pollNow() {
   } catch (e) {}
 }
 
+function setHidden(el, hide) {
+  // SVG elements ignore the .hidden JS property (that's HTMLElement-only) —
+  // set/remove the attribute or nothing visually happens.
+  if (hide) el.setAttribute("hidden", "");
+  else el.removeAttribute("hidden");
+}
 function setToggleIcon(showPause) {
-  $("i-play").hidden = showPause;
-  $("i-pause").hidden = !showPause;
-  $("i-play2").hidden = showPause;
-  $("i-pause2").hidden = !showPause;
+  setHidden($("i-play"), showPause);
+  setHidden($("i-pause"), !showPause);
+  setHidden($("i-play2"), showPause);
+  setHidden($("i-pause2"), !showPause);
+  setHidden($("i-play3"), showPause);
+  setHidden($("i-pause3"), !showPause);
   const label = showPause ? "Pause" : "Play";
-  for (const b of [$("bt-toggle"), $("mini-play")]) {
+  for (const b of [$("bt-toggle"), $("mini-play"), $("m-play")]) {
     b.setAttribute("aria-label", label);
     b.title = label;
   }
@@ -1045,10 +1177,12 @@ function setToggleIcon(showPause) {
 function setPlayDisabled(disabled) {
   $("bt-toggle").disabled = disabled;
   $("mini-play").disabled = disabled;
+  $("m-play").disabled = disabled;
 }
 function setSkipDisabled(disabled) {
   $("bt-skip").disabled = disabled;
   $("mini-skip").disabled = disabled;
+  $("m-skip").disabled = disabled;
 }
 
 /* who's listening: humans in the bot's voice channel, per the bot snapshot */
@@ -1091,7 +1225,13 @@ function renderBot(n) {
   if (document.activeElement !== $("vol")) { $("vol").value = vol; setVolFill(vol); }
   $("vol-pct").textContent = vol + "%";
 
-  $("bt-voice").textContent = n.connected ? "Leave voice" : "Join voice";
+  const voice = $("bt-voice");
+  if (voice.dataset.armed !== "true") {   // never clobber an armed "Leave?"
+    voice.textContent = n.connected ? "In " + noEmoji(n.voice_channel || "voice") : "Connect bot";
+  }
+  // phone bottom bar: shown whenever something plays or tracks are queued
+  document.body.classList.toggle("mbar-on", !!(n.playing || n.queue_len));
+  $("m-qcount").textContent = n.queue_len || 0;
 
   if (!n.playing) {
     $("dk-state").textContent = "Standby";
@@ -1101,10 +1241,14 @@ function renderBot(n) {
     bits.push(n.queue_len ? n.queue_len + (n.queue_len === 1 ? " track" : " tracks") + " waiting" : "queue is empty");
     $("dk-extra").textContent = bits.join(" · ");
     $("dk-title").textContent = "Nothing playing yet";
-    $("dk-sub").textContent = "Search below, audition muted, and add — the bot starts it.";
-    $("dk-img").hidden = true;
-    $("dk-disc").hidden = false;
-    $("mini-art").hidden = true;
+    $("dk-sub").textContent = "Search below, preview muted, and add — the bot starts it.";
+    setHidden($("dk-img"), true);
+    setHidden($("dk-disc"), false);
+    setHidden($("mini-art"), true);
+    $("m-title").textContent = "Nothing playing yet";
+    $("m-artist").textContent = n.queue_len ? n.queue_len + (n.queue_len === 1 ? " track" : " tracks") + " queued" : "";
+    setHidden($("m-art"), true);
+    setHidden($("m-disc"), false);
     setPlayDisabled(true);
     setToggleIcon(false);
     setSkipDisabled(!(n && n.queue_len));
@@ -1125,24 +1269,32 @@ function renderBot(n) {
   $("dk-sub").textContent = noEmoji(n.uploader || "");
   if (n.thumbnail) {
     $("dk-img").src = n.thumbnail;
-    $("dk-img").hidden = false;
-    $("dk-disc").hidden = true;
+    setHidden($("dk-img"), false);
+    setHidden($("dk-disc"), true);
     $("mini-art").src = n.thumbnail;
-    $("mini-art").hidden = false;
+    setHidden($("mini-art"), false);
+    $("m-art").src = n.thumbnail;
+    setHidden($("m-art"), false);
+    setHidden($("m-disc"), true);
   } else {
-    $("dk-img").hidden = true;
-    $("dk-disc").hidden = false;
-    $("mini-art").hidden = true;
+    setHidden($("dk-img"), true);
+    setHidden($("dk-disc"), false);
+    setHidden($("mini-art"), true);
+    setHidden($("m-art"), true);
+    setHidden($("m-disc"), false);
   }
   $("mini-title").textContent = noEmoji(n.title);
+  $("m-title").textContent = noEmoji(n.title);
+  $("m-artist").textContent = noEmoji(n.uploader || "");
   updateMeter();
 }
 
 /* progress bar: real elapsed ticking between polls; no seek — the API has none */
 function updateMeter() {
-  const fill = $("np-fill"), track = $("np-track"), pausedChip = $("t-paused");
+  const fill = $("np-fill"), track = $("np-track"), pausedChip = $("t-paused"), mp = $("mprog");
   if (!snap || !snap.playing) {
     fill.style.transform = "scaleX(0)";
+    mp.style.transform = "scaleX(0)";
     track.setAttribute("aria-valuenow", "0");
     $("t-el").textContent = "–:––";
     $("t-tot").textContent = "–:––";
@@ -1153,11 +1305,13 @@ function updateMeter() {
   if (total > 0) {
     const p = Math.min(1, e / total);
     fill.style.transform = "scaleX(" + p.toFixed(4) + ")";
+    mp.style.transform = "scaleX(" + p.toFixed(4) + ")";
     track.setAttribute("aria-valuenow", String(Math.round(p * 100)));
     $("t-el").textContent = fmtDur(e);
     $("t-tot").textContent = fmtDur(total);
   } else {
     fill.style.transform = "scaleX(1)";
+    mp.style.transform = "scaleX(1)";
     track.setAttribute("aria-valuenow", "100");
     $("t-el").textContent = fmtDur(e);
     $("t-tot").textContent = "LIVE";
@@ -1178,7 +1332,7 @@ new IntersectionObserver((es) => {
 }, { rootMargin: "-70px 0px 0px 0px" }).observe($("deck"));
 
 /* ---------- the queue ---------- */
-let qpage = 1;
+let qpage = 1, lastQsig = "";
 function emptyP(text) { return el("empty", text); }
 function renderQueuePage(n) {
   // cheap path: the /api/now snapshot carries the first 10 rows.
@@ -1187,6 +1341,11 @@ function renderQueuePage(n) {
   const box = $("qlist");
   const q = (n && n.queue) || [];
   const total = (n && n.queue_len) || 0;
+  // rebuild only when the data changed: the 2s poll must not replace rows
+  // under a finger mid-tap — that swallows the tap.
+  const sig = "now:" + total + ":" + JSON.stringify(q);
+  if (sig === lastQsig) return;
+  lastQsig = sig;
   $("qcount").textContent = total ? total + (total === 1 ? " track" : " tracks") : "";
   box.innerHTML = "";
   if (!total) {
@@ -1196,38 +1355,42 @@ function renderQueuePage(n) {
     $("qnext").disabled = true;
     return;
   }
-  q.forEach((t, i) => box.appendChild(queueRow(i + 1, t.title, t.duration, t.requester)));
+  q.forEach((t, i) => box.appendChild(queueRow(i + 1, t)));
   if (total > q.length) box.appendChild(el("morenote", "+" + (total - q.length) + " more on later pages"));
   $("qinfo").textContent = "page 1" + (total > 10 ? " of about " + Math.ceil(total / 10) : "") + " · " + total + " tracks";
   $("qprev").disabled = true;
   $("qnext").disabled = total <= 10;
 }
-function queueRow(index, title, duration, requester) {
+function queueRow(index, t) {
   const row = document.createElement("div");
   row.className = "qrow";
-  const clean = noEmoji(title);
+  const clean = noEmoji(t.title);
+  if (t.qid) row.dataset.qid = t.qid;
   const num = document.createElement("span");
   num.className = "qnum"; num.textContent = index;
   const tx = document.createElement("div");
   tx.className = "rtext";
-  const t = document.createElement("span");
-  t.className = "rtitle"; t.textContent = clean;
+  const ti = document.createElement("span");
+  ti.className = "rtitle"; ti.textContent = clean;
   const s = document.createElement("span");
   s.className = "rsub";
-  s.textContent = noEmoji(requester || "?") + (duration ? " · " + fmtDur(duration) : "");
-  tx.append(t, s);
+  s.textContent = noEmoji(t.requester || "?") + (t.duration ? " · " + fmtDur(t.duration) : "");
+  tx.append(ti, s);
+  // actions target the stable track id: in a shared queue an index can shift
+  // between render and tap — the id cannot.
+  const target = t.qid ? { qid: t.qid } : { index };
   const qplay = document.createElement("button");
   qplay.type = "button"; qplay.className = "qplay";
   qplay.title = "Play now";
   qplay.setAttribute("aria-label", "Play " + clean + " now");
   qplay.innerHTML = PLAY_ICON;
-  qplay.onclick = () => control("jump", { index });
+  qplay.onclick = () => control("jump", target);
   const rm = document.createElement("button");
   rm.type = "button"; rm.className = "rm";
   rm.setAttribute("aria-label", "Remove " + clean + " from the queue");
   rm.title = "Remove from queue";
   rm.innerHTML = X_ICON;
-  rm.onclick = () => control("remove", { index });
+  rm.onclick = () => control("remove", target);
   row.append(num, tx, qplay, rm);
   return row;
 }
@@ -1239,9 +1402,14 @@ async function loadQueuePage(p) {
     const j = await r.json();
     if (!j || !j.ok) return;
     qpage = j.page;
+    const total = j.total || 0;
+    // same fingerprint rule as the poll path: skip the rebuild when the
+    // page payload has not changed
+    const sig = "page:" + j.page + ":" + total + ":" + JSON.stringify(j.items) + ":" + JSON.stringify(j.current);
+    if (sig === lastQsig) return;
+    lastQsig = sig;
     const box = $("qlist");
     box.innerHTML = "";
-    const total = j.total || 0;
     $("qcount").textContent = total ? total + (total === 1 ? " track" : " tracks") : "";
     if (!total && !j.current) {
       box.appendChild(emptyP("Nothing up next — add the first track."));
@@ -1251,7 +1419,7 @@ async function loadQueuePage(p) {
       return;
     }
     if (j.current) box.appendChild(el("nowline", "Playing — " + noEmoji(j.current.title)));
-    for (const t of j.items) box.appendChild(queueRow(t.index, t.title, t.duration, t.requester));
+    for (const t of j.items) box.appendChild(queueRow(t.index, t));
     if (!j.items.length) box.appendChild(emptyP("End of the queue."));
     $("qinfo").textContent = "page " + j.page + " of " + j.total_pages + " · " + total + " tracks";
     $("qprev").disabled = j.page <= 1;
@@ -1286,11 +1454,47 @@ $("bt-mix").onclick = () => control("mix_more");
 $("bt-pl").onclick = () => control("playlist_more");
 $("bt-loop").onclick = () => control("loop");
 $("bt-auto").onclick = () => control("autoplay");
-$("bt-voice").onclick = () => control(snap && snap.connected ? "leave" : "join");
+/* voice status pill: "Connect bot" / "In #channel". Leave hides behind the
+   same two-tap confirm Clear uses — a stray tap never drops the bot. */
+let voiceTimer = null;
+$("bt-voice").onclick = () => {
+  const b = $("bt-voice");
+  if (!(snap && snap.connected)) { control("join"); return; }
+  if (b.dataset.armed !== "true") {
+    b.dataset.armed = "true";
+    b.classList.add("armed");
+    b.textContent = "Leave?";
+    setStatus("Press \u201CLeave?\u201D again within 5 seconds to disconnect the bot.");
+    clearTimeout(voiceTimer);
+    voiceTimer = setTimeout(() => {
+      b.dataset.armed = "false";
+      b.classList.remove("armed");
+      if (snap) b.textContent = snap.connected ? "In " + noEmoji(snap.voice_channel || "voice") : "Connect bot";
+    }, 5000);
+    return;
+  }
+  clearTimeout(voiceTimer);
+  b.dataset.armed = "false";
+  b.classList.remove("armed");
+  control("leave");
+};
 $("qprev").onclick = () => loadQueuePage(qpage - 1);
 $("qnext").onclick = () => loadQueuePage(qpage + 1);
 $("vol-dn").onclick = () => control("volume_delta", { delta: -10 });
 $("vol-up").onclick = () => control("volume_delta", { delta: 10 });
+
+/* ---------- phone bottom bar + queue sheet ---------- */
+$("m-play").onclick = () => control("toggle");
+$("m-skip").onclick = () => control("skip");
+function setSheet(open) { document.body.classList.toggle("qsheet", open); }
+$("m-queue").onclick = () => setSheet(!document.body.classList.contains("qsheet"));
+$("qclose").onclick = () => setSheet(false);
+$("qscrim").onclick = () => setSheet(false);
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") setSheet(false); });
+$("mbody").onclick = () => {
+  setSheet(false);
+  $("deck").scrollIntoView({ behavior: REDUCED ? "auto" : "smooth" });
+};
 
 let clearTimer = null;
 $("bt-clear").onclick = () => {

@@ -44,6 +44,9 @@ class Track:
     needs_resolve: bool = False  # flat listing: stream_url is placeholder until lazy deep resolve
     resolved_at: float = 0.0  # epoch of last successful deep stream resolve
     from_mix: bool = False  # True if queued by autoplay; False if added by a user
+    qid: str = field(default_factory=lambda: secrets.token_hex(6))
+    # stable row id for the web picker: remove/jump target the qid, never the
+    # list index — in a shared queue the index can change between render and tap.
 
 
 def _is_url(s: str) -> bool:
@@ -219,7 +222,7 @@ def now_status(st: GuildState) -> dict:
     """Sync snapshot for the web picker: pause state + frozen-while-paused
     elapsed + the actual queue list (always present, even when idle)."""
     queue = [
-        {"title": t.title, "duration": t.duration, "requester": t.requester}
+        {"title": t.title, "duration": t.duration, "requester": t.requester, "qid": t.qid}
         for t in (*st.user_queue, *st.auto_queue)[:10]
     ]
     base: dict = {
@@ -711,6 +714,15 @@ class MusicPanelView(discord.ui.View):
             return False
         return True
 
+    @discord.ui.button(label="🌐 Web picker", style=discord.ButtonStyle.success, custom_id="music:picker", row=0)
+    async def picker(self, inter: discord.Interaction, _btn: discord.ui.Button):
+        # Fresh per-tap link (tokens expire) — no voice needed to open it.
+        await self.cog._send_picker_link(inter)
+        try:
+            await self.cog._update_panel(inter.guild.id)  # type: ignore — a tap also heals a stale board
+        except Exception:  # noqa: BLE001
+            pass
+
     @discord.ui.button(label="➕ Add", style=discord.ButtonStyle.success, custom_id="music:add", row=0)
     async def add(self, inter: discord.Interaction, _btn: discord.ui.Button):
         try:
@@ -753,7 +765,7 @@ class MusicPanelView(discord.ui.View):
         await self.cog._update_panel(inter.guild.id)  # type: ignore
         await inter.followup.send("⏹ Stopped.", ephemeral=True)
 
-    @discord.ui.button(label="🔀 Shuffle", style=discord.ButtonStyle.secondary, custom_id="music:shuffle", row=0)
+    @discord.ui.button(label="🔀 Shuffle", style=discord.ButtonStyle.secondary, custom_id="music:shuffle", row=1)
     async def shuffle(self, inter: discord.Interaction, _btn: discord.ui.Button):
         if not await self._ack(inter):
             return
@@ -786,26 +798,7 @@ class MusicPanelView(discord.ui.View):
         await self.cog._update_panel(inter.guild.id)  # type: ignore
         await inter.followup.send(msg, ephemeral=True)
 
-    @discord.ui.button(label="📜 Queue", style=discord.ButtonStyle.secondary, custom_id="music:queue", row=1)
-    async def queue(self, inter: discord.Interaction, _btn: discord.ui.Button):
-        try:
-            await _safe_defer(inter, ephemeral=True)
-        except discord.NotFound:
-            return
-        st = self.cog.state(inter.guild.id)  # type: ignore
-        lines = []
-        if st.current:
-            lines.append(f"**Now:** {st.current.title} (`{fmt_duration(st.current.duration)}`)")
-        tracks = [*st.user_queue, *st.auto_queue]
-        for i, t in enumerate(tracks[:10], start=1):
-            lines.append(f"`{i}.` {t.title} (`{fmt_duration(t.duration)}`) — {t.requester}")
-        if len(tracks) > 10:
-            lines.append(f"…and {len(tracks) - 10} more (use `/queue` for pages)")
-        em = discord.Embed(title="📜 Queue", description="\n".join(lines) or "Queue is empty.",
-                            colour=discord.Colour.blurple())
-        await inter.followup.send(embed=em, ephemeral=True)
-
-    @discord.ui.button(label="🔮 Autoplay", style=discord.ButtonStyle.secondary, custom_id="music:autoplay", row=2)
+    @discord.ui.button(label="🔮 Autoplay", style=discord.ButtonStyle.secondary, custom_id="music:autoplay", row=1)
     async def autoplay(self, inter: discord.Interaction, _btn: discord.ui.Button):
         if not await self._ack(inter):
             return
@@ -815,20 +808,6 @@ class MusicPanelView(discord.ui.View):
         await inter.followup.send(
             f"🔮 Autoplay is now **{'ON' if st.autoplay else 'OFF'}**.", ephemeral=True
         )
-
-    @discord.ui.button(label="🌐 Picker", style=discord.ButtonStyle.success, custom_id="music:picker", row=2)
-    async def picker(self, inter: discord.Interaction, _btn: discord.ui.Button):
-        # Fresh per-tap link (tokens expire) — no voice needed to open it.
-        await self.cog._send_picker_link(inter)
-
-    @discord.ui.button(label="🔄 Refresh", style=discord.ButtonStyle.secondary, custom_id="music:refresh", row=1)
-    async def refresh(self, inter: discord.Interaction, _btn: discord.ui.Button):
-        try:
-            await _safe_defer(inter, ephemeral=True)
-        except discord.NotFound:
-            return
-        await self.cog._update_panel(inter.guild.id)  # type: ignore
-        await inter.followup.send("🔄 Panel refreshed.", ephemeral=True)
 
 
 class Music(commands.Cog):
@@ -1137,6 +1116,19 @@ class Music(commands.Cog):
                     return ch
         return None
 
+    def _qid_index(self, st: GuildState, qid) -> int | None:
+        """Resolve a web queue row's stable track id to its current 1-based
+        index in the combined queue, or None when absent/unknown. A stale qid
+        must fail — falling back to a position would remove whatever track
+        slid into that slot in the shared queue."""
+        qid = str(qid or "").strip()
+        if not qid:
+            return None
+        for i, t in enumerate((*st.user_queue, *st.auto_queue)):
+            if getattr(t, "qid", "") == qid:
+                return i + 1
+        return None
+
     async def web_control(self, guild_id: int, user_id: int, action: str, params: dict | None = None) -> tuple[bool, str]:
         """Full bot control from the picker page. Same code paths as the
         Discord buttons/slash commands. params carries action args
@@ -1229,10 +1221,14 @@ class Music(commands.Cog):
             await self._update_panel(guild_id)
             return True, f"🔮 Autoplay is now **{'ON' if st.autoplay else 'OFF'}**."
         if action == "remove":
-            try:
-                index = int(params.get("index", 0))
-            except (TypeError, ValueError):
-                return False, "index must be a number."
+            index = self._qid_index(st, params.get("qid"))
+            if index is None:
+                if str(params.get("qid", "") or "").strip():
+                    return False, "That track is no longer in the queue."
+                try:
+                    index = int(params.get("index", 0))
+                except (TypeError, ValueError):
+                    return False, "index must be a number."
             t = self._remove_at(st, index)
             if t is None:
                 return False, "Invalid index."
@@ -1247,10 +1243,14 @@ class Music(commands.Cog):
             # Reuses _do_skip so debounce/voice-heal/loop semantics stay identical.
             if member is None:
                 return False, "User gone."
-            try:
-                index = int(params.get("index", 0))
-            except (TypeError, ValueError):
-                return False, "index must be a number."
+            index = self._qid_index(st, params.get("qid"))
+            if index is None:
+                if str(params.get("qid", "") or "").strip():
+                    return False, "That track is no longer in the queue."
+                try:
+                    index = int(params.get("index", 0))
+                except (TypeError, ValueError):
+                    return False, "index must be a number."
             track = self._remove_at(st, index)
             if track is None:
                 return False, "Invalid index."
@@ -1355,7 +1355,8 @@ class Music(commands.Cog):
         tracks = [*st.user_queue, *st.auto_queue]
         items = [
             {"index": start + i + 1, "title": t.title, "duration": t.duration,
-             "requester": t.requester, "uploader": t.uploader, "from_auto": t.from_mix}
+             "requester": t.requester, "uploader": t.uploader, "from_auto": t.from_mix,
+             "qid": t.qid}
             for i, t in enumerate(tracks[start:start + per])
         ]
         total_pages = max(1, math.ceil(len(tracks) / per)) if tracks else 1
@@ -2300,7 +2301,7 @@ class Music(commands.Cog):
         st = self.state(guild_id)
         t = st.current
         if not t:
-            em = discord.Embed(title="🎧 Music Panel", description="Nothing playing.\nPress **➕ Add** and drop a song name, video link, or playlist link.",
+            em = discord.Embed(title="🎧 Music Panel", description="Nothing playing.\n**➕ Add** drops a song name, video link, or playlist link — or tap **🌐 Web picker** to search in your browser (previews, live queue, full control).",
                                colour=discord.Colour.dark_grey())
             em.add_field(name="Up next", value=f"🎵 {len(st.user_queue)} · 🔮 {len(st.auto_queue)}")
             em.add_field(name="Loop", value=st.loop_mode)
@@ -2311,7 +2312,7 @@ class Music(commands.Cog):
             return em
         elapsed = (time.time() - st.started_at) if st.started_at else 0
         icon = "⏸" if st.paused else "▶"
-        em = discord.Embed(title="🎧 Music Panel", description=f"{icon} **{t.title}**", colour=discord.Colour.blurple())
+        em = discord.Embed(title="🎧 Music Panel", description=f"{icon} **{t.title}**\n🌐 Search, queue & full control in your browser — tap **Web picker**", colour=discord.Colour.blurple())
         em.add_field(name="Progress", value=f"`{progress_bar(elapsed, t.duration)}` `{fmt_duration(t.duration)}`", inline=False)
         em.add_field(name="Requested by", value=t.requester)
         em.add_field(name="Up next", value=f"🎵 {len(st.user_queue)} · 🔮 {len(st.auto_queue)}")
@@ -2677,7 +2678,7 @@ class Music(commands.Cog):
 
     async def _send_picker_link(self, inter: discord.Interaction):
         """Ephemeral fresh picker link (per-tap token). Shared by the panel's
-        🌐 Picker button and /music mode:web. No voice required to open the
+        🌐 Web picker button and /music mode:web. No voice required to open the
         link — only to press Queue inside the page."""
         try:
             await _safe_defer(inter, ephemeral=True)
@@ -2705,7 +2706,7 @@ class Music(commands.Cog):
         if "trycloudflare.com" in base:
             note = "\n☁️ Public link via Cloudflare — works on any network, no setup needed."
         elif "127.0.0.1" in base or "localhost" in base:
-            note = "\n⚠️ Public tunnel still starting or unavailable — this link only works on this machine. Tap 🌐 Picker again in ~10s, or set `WEB_BASE_URL`."
+            note = "\n⚠️ Public tunnel still starting or unavailable — this link only works on this machine. Tap 🌐 Web picker again in ~10s, or set `WEB_BASE_URL`."
         else:
             note = ""
         if channel_id is None:
@@ -2777,7 +2778,7 @@ class Music(commands.Cog):
     @app_commands.command(name="help", description="List commands")
     async def help(self, inter: discord.Interaction):
         em = discord.Embed(title="🎧 Music Bot", colour=discord.Colour.blurple(),
-                            description="**/music** — button panel (🌐 Picker = browser YouTube search)\n/play /search /playlist /queue /nowplaying\n/skip /pause /resume /stop\n/remove /clear /shuffle /loop /volume\n/join /leave")
+                            description="**/music** — button panel (🌐 Web picker = browser YouTube search)\n/play /search /playlist /queue /nowplaying\n/skip /pause /resume /stop\n/remove /clear /shuffle /loop /volume\n/join /leave")
         em.set_footer(text="Tip: 'Sign in to confirm you're not a bot' → add cookies.txt and rebuild.")
         await inter.response.send_message(embed=em, ephemeral=True)
 
