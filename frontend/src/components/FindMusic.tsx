@@ -140,7 +140,7 @@ export function FindMusic({
   const queuePending = audition.selected ? pending.has(`pick:${audition.selected.videoId}`) : false
 
   return (
-    <section className="find" aria-label="Find music">
+    <section className="find" id="find" aria-label="Find music">
       <h2 className="h-sect">Find music</h2>
       <p className="sect-note">Tap a result to preview it muted on this device, then add it for the room.</p>
 

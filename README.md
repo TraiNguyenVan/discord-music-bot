@@ -127,7 +127,7 @@ If a `/playlist` shows `910× Video unavailable` + `rate-limited for up to an ho
 
 ## Web picker UI (frontend/)
 
-The `/music` 🌐 Picker link opens a React + TypeScript single-page app, served by the bot's aiohttp sidecar at `/pick` (from `frontend/dist/`). Same dark panel UX: live now-playing + transport, queue with pagination, in-page search with in-page auditions, quick add. It talks to the same `/api/*` routes — the Python side is unchanged.
+The `/music` 🌐 Picker link opens a React + TypeScript single-page app, served by the bot's aiohttp sidecar at `/pick` (from `frontend/dist/`). Spotify-style layout: fixed sidebar, sticky topbar, now-playing header tinted by the album art, discovery column with muted in-page auditions, a right-hand queue panel (bottom sheet on phones), and an always-on player bar with transport, modes, and bot volume. It talks to the same `/api/*` routes — the Python side is unchanged.
 
 ```sh
 cd frontend
@@ -139,6 +139,20 @@ npm run build       # production bundle → frontend/dist/, served at /pick
 ```
 
 Outside Docker, build once before `python bot.py`. A stale `frontend/dist` makes `/pick` return an actionable 503.
+
+### UI dev harness (no bot required)
+
+`frontend/` ships a mock of the aiohttp API plus headless-Chromium tooling so the UI can be developed and verified without a running bot:
+
+```sh
+cd frontend
+node mock-server.mjs            # mock /api/* on :8766 (WEB_MOCK_PORT to change)
+WEB_PORT=8766 npx vite --port 5199
+node shot.mjs "http://localhost:5199/?token=mock" shots/desktop.png 1440 900 full   # screenshot
+node e2e.mjs                    # scripted interaction pass (search/preview/add/sheet)
+```
+
+`shot.mjs`/`e2e.mjs` need `playwright-core` (dev dependency) and a system `chromium` binary. Screenshots land in `frontend/shots/` (git-ignored).
 
 ## Project structure
 

@@ -1,16 +1,15 @@
 /* Find music: search + suggestions, link preview, the muted audition
- * player, track cards, related tracks, and quick add. Mirror of the legacy
- * picker's discovery column, on the shared tokens. */
+ * player, track rows, related tracks. */
 
 /* ---- inputs and forms ---- */
 .field {
   width: 100%;
   min-width: 0;
-  min-height: 48px;
-  padding: 12px 16px;
+  min-height: 44px;
+  padding: 10px 16px;
   background: var(--field);
-  border: 1px solid var(--line);
-  border-radius: 999px;
+  border: 1px solid transparent;
+  border-radius: 8px;
   color: var(--text);
   font: inherit;
 }
@@ -20,17 +19,17 @@
 }
 
 .field:hover {
-  border-color: rgba(255, 255, 255, 0.2);
+  border-color: rgba(255, 255, 255, 0.25);
 }
 
 .field:focus {
-  border-color: var(--green);
+  border-color: rgba(255, 255, 255, 0.7);
   outline: none;
 }
 
 .field:focus-visible {
-  outline: 2px solid var(--green);
-  outline-offset: 2px;
+  outline: 2px solid var(--text);
+  outline-offset: 1px;
 }
 
 .findbar,
@@ -59,12 +58,12 @@
 }
 
 .searchwrap .field {
-  padding-left: 44px;
+  padding-left: 42px;
 }
 
 .sicon {
   position: absolute;
-  left: 15px;
+  left: 14px;
   top: 50%;
   translate: 0 -50%;
   color: var(--faint);
@@ -78,9 +77,8 @@
   right: 0;
   top: calc(100% + 6px);
   z-index: 12;
-  background: var(--panel-2);
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
+  background: #282828;
+  border-radius: 8px;
   overflow: hidden;
   padding: 4px;
   box-shadow: 0 18px 44px rgba(0, 0, 0, 0.55);
@@ -99,10 +97,9 @@
 
 .sugg [role='option']:hover,
 .sugg [role='option']:focus {
-  background: #282828;
+  background: #3e3e3e;
   color: var(--text);
   outline: none;
-  box-shadow: inset 2px 0 0 var(--green);
 }
 
 .count {
@@ -112,27 +109,27 @@
   min-height: 1.2em;
 }
 
-/* ---- cta (green) + small variant ---- */
+/* ---- cta (green pill) ---- */
 .cta {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: 8px;
   min-height: 44px;
-  padding: 9px 22px;
+  padding: 9px 24px;
   border: 0;
   border-radius: 999px;
   background: var(--green);
-  color: #04150a;
+  color: var(--on-green);
   font: inherit;
-  font-size: 0.84rem;
-  font-weight: 600;
+  font-size: 0.88rem;
+  font-weight: 800;
   cursor: pointer;
   transition: transform 120ms ease, background-color 150ms ease;
 }
 
 .cta:hover:not(:disabled) {
-  transform: scale(1.03);
+  transform: scale(1.04);
   background: var(--green-hover);
 }
 
@@ -141,7 +138,7 @@
 }
 
 .cta:focus-visible {
-  outline: 2px solid var(--green);
+  outline: 2px solid var(--text);
   outline-offset: 2px;
 }
 
@@ -152,7 +149,7 @@
 }
 
 .cta.small {
-  min-height: 40px;
+  min-height: 38px;
   padding: 7px 16px;
   font-size: 0.78rem;
 }
@@ -160,10 +157,9 @@
 /* ---- audition: muted preview, never fights the room ---- */
 .aud {
   margin-top: 16px;
-  background: var(--panel);
-  border: 1px solid var(--line);
+  background: var(--elev);
   border-radius: var(--radius);
-  padding: 18px;
+  padding: 16px;
 }
 
 .aud-head {
@@ -185,10 +181,9 @@
 .aud-slot {
   position: relative;
   aspect-ratio: 16 / 9;
-  border-radius: 10px;
+  border-radius: var(--radius-sm);
   overflow: hidden;
   background: #000;
-  border: 1px solid var(--line);
 }
 
 /* The mount div is replaced by the player iframe; both fill the 16:9 slot. */
@@ -231,7 +226,7 @@
 
 .aud-title {
   font-size: 1rem;
-  font-weight: 600;
+  font-weight: 700;
   line-height: 1.35;
   margin: 0;
   overflow-wrap: anywhere;
@@ -247,13 +242,12 @@
   font-size: 0.8rem;
 }
 
-/* ---- track cards: the row auditions, the side button adds ---- */
+/* ---- track rows: thumb | title | duration | add ---- */
 .rowwrap {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  border-bottom: 1px solid var(--line-weak);
-  border-radius: var(--radius-sm);
+  border-radius: 6px;
   transition: background-color 150ms ease;
 }
 
@@ -261,16 +255,11 @@
   background: var(--row-hover);
 }
 
-.rowwrap:last-child {
-  border-bottom: 0;
-}
-
 .row {
   display: flex;
-  gap: 14px;
+  gap: 12px;
   align-items: center;
-  padding: 9px 10px;
-  min-height: 80px;
+  padding: 6px 8px 6px 6px;
   min-width: 0;
   text-align: left;
   width: 100%;
@@ -284,17 +273,17 @@
 }
 
 .row:focus-visible {
-  outline: 2px solid var(--green);
-  outline-offset: 2px;
+  outline: 2px solid var(--text);
+  outline-offset: -2px;
+  border-radius: 6px;
 }
 
-/* track cards clamp to two lines (queue rows stay single-line) */
 .row .rtext {
   flex: 1;
 }
 
 .row .rtitle {
-  font-size: 0.92rem;
+  font-size: 0.9rem;
   font-weight: 500;
   line-height: 1.35;
   white-space: normal;
@@ -305,37 +294,32 @@
 }
 
 .row .rsub {
-  font-size: 0.78rem;
-  margin-top: 3px;
+  font-size: 0.76rem;
 }
 
 .rthumb {
   position: relative;
-  width: clamp(104px, 13vw, 136px);
-  aspect-ratio: 16 / 9;
+  width: 48px;
+  height: 48px;
   flex-shrink: 0;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   overflow: hidden;
-  background: var(--field);
-  border: 1px solid var(--line-weak);
+  background: var(--elev);
 }
 
 .rthumb img {
   width: 100%;
   height: 100%;
   object-fit: cover;
+  display: block;
 }
 
 .rdur {
-  position: absolute;
-  right: 5px;
-  bottom: 5px;
-  background: rgba(0, 0, 0, 0.82);
-  color: #fff;
-  font-size: 0.66rem;
-  font-variant-numeric: tabular-nums;
-  padding: 1px 6px;
-  border-radius: 4px;
+  font-size: 0.76rem;
+  color: var(--sub);
+  flex: none;
+  min-width: 40px;
+  text-align: right;
 }
 
 .playov {
@@ -343,17 +327,17 @@
   inset: 0;
   display: grid;
   place-items: center;
-  background: rgba(0, 0, 0, 0.36);
+  background: rgba(0, 0, 0, 0.5);
   opacity: 0;
   transition: opacity 150ms ease;
 }
 
 .playov span {
-  width: 36px;
-  height: 36px;
+  width: 30px;
+  height: 30px;
   border-radius: 50%;
   background: var(--green);
-  color: #04150a;
+  color: var(--on-green);
   display: grid;
   place-items: center;
   box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
@@ -370,16 +354,41 @@
   }
 }
 
+/* circular add button: hidden until hover on pointers, always there on touch */
 .radd {
-  margin: 0 6px 0 2px;
-  align-self: center;
+  width: 36px;
+  height: 36px;
+  margin-right: 4px;
+  border-radius: 50%;
+  border: 0;
+  background: transparent;
+  color: var(--sub);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background-color 150ms ease, color 150ms ease, opacity 150ms ease, translate 150ms ease;
+}
+
+.radd:hover:not(:disabled) {
+  background: var(--green);
+  color: var(--on-green);
+}
+
+.radd:focus-visible {
+  outline: 2px solid var(--text);
+  outline-offset: 2px;
+}
+
+.radd:disabled {
+  color: var(--faint);
+  cursor: default;
 }
 
 @media (hover: hover) {
   .radd {
     opacity: 0;
     translate: 0 4px;
-    transition: opacity 150ms ease, translate 150ms ease;
   }
 
   .rowwrap:hover .radd,
@@ -389,19 +398,40 @@
   }
 }
 
-/* ---- quick add lives above the queue, separated like the legacy card ---- */
+/* ---- quick add lives above the queue ---- */
 .quickadd {
   padding-bottom: 16px;
-  margin-bottom: 16px;
+  margin-bottom: 14px;
   border-bottom: 1px solid var(--line-weak);
+}
+
+/* ---- section headings inside the find column ---- */
+.sect {
+  margin-top: 18px;
+}
+
+.sect-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.h-sub {
+  font-size: 0.95rem;
+  font-weight: 800;
+  margin: 0;
+  text-wrap: balance;
+}
+
+.sect-note {
+  color: var(--faint);
+  font-size: 0.78rem;
+  margin: 4px 0 10px;
 }
 
 /* ---- responsive ---- */
 @media (max-width: 760px) {
-  .rthumb {
-    width: 104px;
-  }
-
   .aud-meta {
     flex-direction: column;
     align-items: stretch;
@@ -422,17 +452,17 @@
 
   .findbar .cta {
     position: absolute;
-    right: 7px;
+    right: 6px;
     top: 50%;
     translate: 0 -50%;
     width: auto;
-    min-height: 36px;
+    min-height: 34px;
     padding: 6px 14px;
     font-size: 0.76rem;
   }
 
   .searchwrap .field {
-    padding-right: 96px;
+    padding-right: 92px;
   }
 }
 
@@ -455,18 +485,8 @@
     gap: 10px;
   }
 
-  .rthumb {
-    width: 96px;
-  }
-}
-
-@media (max-width: 400px) {
-  .rthumb {
-    width: 82px;
-  }
-
-  .row .rtitle {
-    font-size: 0.86rem;
+  .rdur {
+    display: none;
   }
 }
 

@@ -7,17 +7,18 @@ import type { ControlAction } from '../types/music'
 import type { SessionInfo } from '../types/api'
 import { useMusicSession } from '../hooks/useMusicSession'
 import { useAudition } from '../hooks/useAudition'
-import { AppHeader } from './AppHeader'
+import { useMediaQuery } from '../hooks/useMediaQuery'
+import { Sidebar } from './Sidebar'
+import { TopBar } from './TopBar'
 import { NowPlaying } from './NowPlaying'
-import { PlaybackControls } from './PlaybackControls'
+import { StopButton } from './PlaybackControls'
 import { ModeControls } from './ModeControls'
 import { VolumeControl } from './VolumeControl'
 import { FindMusic } from './FindMusic'
 import { QuickAdd } from './QuickAdd'
 import { QueuePanel } from './QueuePanel'
 import { StatusLine } from './StatusLine'
-import { MiniPlayer } from './MiniPlayer'
-import { BottomBar } from './BottomBar'
+import { PlayerBar } from './PlayerBar'
 import { ScrollTop } from './ScrollTop'
 
 interface PlayerViewProps {
@@ -27,31 +28,21 @@ interface PlayerViewProps {
 }
 
 /**
- * The migrated player + queue screen. Owns no data itself: all polling,
- * controls, status, and pagination come from `useMusicSession`; components
- * render from that state and post through the same runner.
+ * The Spotify-style shell: fixed sidebar, sticky topbar, a scrollable main
+ * column (now-playing header, search, queue), and the always-on player bar.
+ * Owns no data itself: all polling, controls, status, and pagination come
+ * from `useMusicSession`; components render from that state and post through
+ * the same runner.
  */
 export function PlayerView({ client, session, onExpired }: PlayerViewProps) {
   const ms = useMusicSession(client, onExpired)
   const audition = useAudition()
   const deckRef = useRef<HTMLElement | null>(null)
-  const [deckAway, setDeckAway] = useState(false)
   const [sheetOpen, setSheetOpen] = useState(false)
   const [backends, setBackends] = useState(DEFAULT_SEARCH_BACKENDS)
   const [related, setRelated] = useState<SearchResult[] | null>(null)
   const relatedSeq = useRef(0)
-
-  // Mini player appears when the hero scrolls out of view.
-  useEffect(() => {
-    const el = deckRef.current
-    if (!el || typeof IntersectionObserver === 'undefined') return
-    const obs = new IntersectionObserver(
-      (entries) => setDeckAway(!entries[0]?.isIntersecting),
-      { rootMargin: '-70px 0px 0px 0px' },
-    )
-    obs.observe(el)
-    return () => obs.disconnect()
-  }, [])
+  const desktop = useMediaQuery('(min-width: 1000px)')
 
   // Phone queue sheet: body class drives the slide-up + scroll lock.
   useEffect(() => {
@@ -81,14 +72,23 @@ export function PlayerView({ client, session, onExpired }: PlayerViewProps) {
     [ms.runControl],
   )
 
-  const openPlayer = useCallback(() => {
-    setSheetOpen(false)
-    deckRef.current?.scrollIntoView({
-      behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth',
-    })
+  const scrollTo = useCallback((id: string) => {
+    const el = document.getElementById(id)
+    if (!el) return
+    const reduced = typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    el.scrollIntoView({ behavior: reduced ? 'auto' : 'smooth', block: 'start' })
   }, [])
 
-  const openQueue = useCallback(() => setSheetOpen(true), [])
+  const openPlayer = useCallback(() => {
+    setSheetOpen(false)
+    scrollTo('main')
+  }, [scrollTo])
+
+  // Phones: the queue is a bottom sheet. Wide screens: scroll to the panel.
+  const openQueue = useCallback(() => {
+    if (desktop) scrollTo('queue')
+    else setSheetOpen(true)
+  }, [desktop, scrollTo])
   const closeQueue = useCallback(() => setSheetOpen(false), [])
 
   // Search backends come from the bot's config; the defaults cover an outage.
@@ -152,73 +152,84 @@ export function PlayerView({ client, session, onExpired }: PlayerViewProps) {
     [ms.runPick],
   )
 
-  const { now } = ms
-  const playing = !!now?.playing
-  const showMbar = playing || (now?.queue_len ?? 0) > 0
-
   return (
-    <>
+    <div className="shell">
       <a className="skip-link" href="#main">
         Skip to the player
       </a>
-      <AppHeader
-        session={session}
-        now={now}
-        pending={ms.pending}
-        onControl={ms.runControl}
-        onStatus={ms.setStatus}
-      />
-      <main className="app-main" id="main">
-        <NowPlaying now={now} elapsed={ms.elapsed} stale={ms.stale} ref={deckRef}>
-          <div className="transport">
-            <PlaybackControls now={now} pending={ms.pending} onControl={runSimple} />
-            <ModeControls now={now} pending={ms.pending} onControl={runSimple} />
-            <VolumeControl
-              volume={now?.volume ?? 50}
-              pending={ms.pending}
-              onSet={handleVolumeSet}
-              onDelta={handleVolumeDelta}
-            />
-          </div>
-          <StatusLine status={ms.status} />
-        </NowPlaying>
-        <FindMusic
-          client={client}
-          backends={backends}
-          audition={audition}
-          onPreview={preview}
-          onAdd={addTrack}
-          related={related}
-          pending={ms.pending}
-          onStatus={ms.setStatus}
-          onExpired={onExpired}
-        />
-        <QueuePanel
-          now={now}
-          page={ms.page}
-          pageData={ms.pageData}
+      <Sidebar now={ms.now} />
+      <div className="frame">
+        <TopBar
+          session={session}
+          now={ms.now}
           pending={ms.pending}
           onControl={ms.runControl}
-          onPage={ms.gotoPage}
           onStatus={ms.setStatus}
-          onClose={closeQueue}
-        >
-          <QuickAdd onPlay={ms.runPlay} onPreview={preview} onAdd={addTrack} pending={ms.pending} />
-        </QueuePanel>
-      </main>
-      {deckAway && playing && <MiniPlayer now={now} pending={ms.pending} onControl={runSimple} />}
-      {showMbar && (
-        <BottomBar
-          now={now}
-          elapsed={ms.elapsed}
-          pending={ms.pending}
-          onControl={runSimple}
-          onOpenQueue={openQueue}
-          onOpenPlayer={openPlayer}
         />
+        <main className="app-main" id="main">
+          <NowPlaying now={ms.now} elapsed={ms.elapsed} stale={ms.stale} ref={deckRef}>
+            {!desktop && (
+              <div className="hero-tools">
+                <ModeControls now={ms.now} pending={ms.pending} onControl={runSimple} />
+                <StopButton pending={ms.pending} onControl={runSimple} />
+                <VolumeControl
+                  volume={ms.now?.volume ?? 50}
+                  pending={ms.pending}
+                  onSet={handleVolumeSet}
+                  onDelta={handleVolumeDelta}
+                />
+              </div>
+            )}
+          </NowPlaying>
+
+          <div className="cols">
+            <FindMusic
+              client={client}
+              backends={backends}
+              audition={audition}
+              onPreview={preview}
+              onAdd={addTrack}
+              related={related}
+              pending={ms.pending}
+              onStatus={ms.setStatus}
+              onExpired={onExpired}
+            />
+            <QueuePanel
+              now={ms.now}
+              page={ms.page}
+              pageData={ms.pageData}
+              pending={ms.pending}
+              onControl={ms.runControl}
+              onPage={ms.gotoPage}
+              onStatus={ms.setStatus}
+              onClose={closeQueue}
+            >
+              <QuickAdd onPlay={ms.runPlay} onPreview={preview} onAdd={addTrack} pending={ms.pending} />
+            </QueuePanel>
+          </div>
+        </main>
+      </div>
+
+      <PlayerBar
+        now={ms.now}
+        elapsed={ms.elapsed}
+        pending={ms.pending}
+        onControl={runSimple}
+        onOpenQueue={openQueue}
+        onOpenPlayer={openPlayer}
+        desktop={desktop}
+        volume={ms.now?.volume ?? 50}
+        onVolumeSet={handleVolumeSet}
+        onVolumeDelta={handleVolumeDelta}
+      />
+
+      {ms.status && (
+        <div className="toast">
+          <StatusLine status={ms.status} />
+        </div>
       )}
       {sheetOpen && <div className="qscrim" aria-hidden="true" onClick={closeQueue} />}
       <ScrollTop />
-    </>
+    </div>
   )
 }

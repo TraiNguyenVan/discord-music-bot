@@ -1,4 +1,4 @@
-import { LoaderCircle, Play } from 'lucide-react'
+import { LoaderCircle, Play, Plus } from 'lucide-react'
 import { fmtDur, noEmoji } from '../lib/format'
 import type { SearchResult } from '../types/api'
 
@@ -12,7 +12,7 @@ interface TrackListProps {
 }
 
 /**
- * Track cards shared by search results, related tracks, and quick-add
+ * Track rows shared by search results, related tracks, and quick-add
  * results: the row auditions (muted preview), the side button adds for the
  * room. Pending add shows as a spinner scoped to the tapped button.
  */
@@ -34,11 +34,10 @@ export function TrackList({ results, emptyText, onAudition, onAdd, pending }: Tr
               onClick={() => onAudition(m)}
             >
               <span className="rthumb">
-                <img src={m.thumbnail} alt="" width={320} height={180} loading="lazy" decoding="async" />
-                {m.duration > 0 && <span className="rdur">{fmtDur(m.duration)}</span>}
+                <img src={m.thumbnail} alt="" width={64} height={64} loading="lazy" decoding="async" />
                 <span className="playov" aria-hidden="true">
                   <span>
-                    <Play size={16} aria-hidden="true" />
+                    <Play size={16} fill="currentColor" aria-hidden="true" />
                   </span>
                 </span>
               </span>
@@ -46,15 +45,22 @@ export function TrackList({ results, emptyText, onAudition, onAdd, pending }: Tr
                 <span className="rtitle">{clean}</span>
                 <span className="rsub">{noEmoji(m.uploader)}</span>
               </span>
+              <span className="rdur tnum" aria-hidden="true">
+                {m.duration > 0 ? fmtDur(m.duration) : ''}
+              </span>
             </button>
             <button
               type="button"
-              className="cta small radd"
+              className="radd"
               aria-label={`Add ${clean} to the queue`}
               disabled={adding}
               onClick={() => onAdd(m)}
             >
-              {adding && <LoaderCircle size={12} className="spin" aria-hidden="true" />} Add
+              {adding ? (
+                <LoaderCircle size={16} className="spin" aria-hidden="true" />
+              ) : (
+                <Plus size={18} aria-hidden="true" />
+              )}
             </button>
           </div>
         )

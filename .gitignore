@@ -11,4 +11,5 @@ data/
 .firecrawl/
 frontend/node_modules/
 frontend/dist/
+frontend/shots/
 

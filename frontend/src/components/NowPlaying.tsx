@@ -1,6 +1,8 @@
-import type { ReactNode, Ref } from 'react'
+import type { CSSProperties, ReactNode, Ref } from 'react'
+import { Music2 } from 'lucide-react'
 import type { NowState } from '../types/music'
 import { fmtDur, noEmoji } from '../lib/format'
+import { useDominantColor } from '../hooks/useDominantColor'
 
 interface NowPlayingProps {
   now: NowState | null
@@ -8,7 +10,7 @@ interface NowPlayingProps {
   elapsed: number
   /** True when the last poll failed transiently. */
   stale: boolean
-  /** Transport / modes / volume / feedback render inside the hero bottom. */
+  /** Phone-only tools (modes / stop / volume) render under the progress. */
   children?: ReactNode
   ref?: Ref<HTMLElement>
 }
@@ -46,9 +48,10 @@ function Listeners({ now }: { now: NowState }) {
 }
 
 /**
- * The now-playing deck: state line, title, art, listeners, and the progress
- * bar with real elapsed ticking between polls. `duration === 0` means LIVE.
- * The connected/playing facts are backend-confirmed only — never invented.
+ * The now-playing header, in the shape of a Spotify playlist header: the
+ * art tints the panel, the state line sits above a huge title, and the
+ * progress row closes it. `duration === 0` means LIVE. The connected /
+ * playing facts are backend-confirmed only — never invented.
  */
 export function NowPlaying({ now, elapsed, stale, children, ref }: NowPlayingProps) {
   const playing = !!now?.playing
@@ -56,6 +59,7 @@ export function NowPlaying({ now, elapsed, stale, children, ref }: NowPlayingPro
   const live = playing && (now?.duration ?? 0) === 0
   const total = now?.duration ?? 0
   const pct = playing && total > 0 ? Math.min(1, elapsed / total) : playing ? 1 : 0
+  const tint = useDominantColor(playing ? now?.thumbnail : undefined)
 
   const stateText = !now ? 'Standby' : paused ? 'Paused' : playing ? 'Now playing' : 'Standby'
   const title = playing ? noEmoji(now?.title ?? '') : 'Nothing playing yet'
@@ -64,22 +68,19 @@ export function NowPlaying({ now, elapsed, stale, children, ref }: NowPlayingPro
   const deckClass = 'hero deck' + (playing ? ' playing' : '') + (paused ? ' paused' : '')
 
   return (
-    <section className={deckClass} aria-label="Now playing" ref={ref}>
+    <section
+      className={deckClass}
+      aria-label="Now playing"
+      ref={ref}
+      style={tint ? ({ '--tint': tint } as CSSProperties) : undefined}
+    >
       <div className="hero-art" aria-hidden="true">
         {thumbnail ? (
-          <img src={thumbnail} alt="" width={320} height={320} loading="lazy" decoding="async" />
+          <img src={thumbnail} alt="" width={192} height={192} loading="lazy" decoding="async" />
         ) : (
-          <svg className="disc" viewBox="0 0 24 24" fill="none">
-            <path
-              d="M9 18.5V6.2l10-2.3v10.6"
-              stroke="currentColor"
-              strokeWidth="1.6"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
-            <circle cx="6.5" cy="18.5" r="2.6" fill="currentColor" />
-            <circle cx="16.5" cy="14.5" r="2.6" fill="currentColor" />
-          </svg>
+          <span className="disc">
+            <Music2 size={56} aria-hidden="true" />
+          </span>
         )}
       </div>
 
@@ -92,7 +93,7 @@ export function NowPlaying({ now, elapsed, stale, children, ref }: NowPlayingPro
           </span>
           <span>{stateText}</span>
           <span className="np-sep" aria-hidden="true">
-            —
+            ·
           </span>
           <span>{extraBits(now, stale)}</span>
         </p>
@@ -102,20 +103,22 @@ export function NowPlaying({ now, elapsed, stale, children, ref }: NowPlayingPro
       </div>
 
       <div className="hero-bottom">
-        <div
-          className="np-track"
-          role="progressbar"
-          aria-label="Playback progress"
-          aria-valuemin={0}
-          aria-valuemax={100}
-          aria-valuenow={Math.round(pct * 100)}
-        >
-          <div className="np-fill" style={{ transform: `scaleX(${pct.toFixed(4)})` }} />
-        </div>
-        <div className="np-times tnum">
-          <span>{playing ? fmtDur(elapsed) : '–:––'}</span>
-          {paused && <span className="chip">Paused</span>}
-          <span>{!playing ? '–:––' : live ? 'LIVE' : fmtDur(total)}</span>
+        <div className="np-progress">
+          <div
+            className="np-track"
+            role="progressbar"
+            aria-label="Playback progress"
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={Math.round(pct * 100)}
+          >
+            <div className="np-fill" style={{ transform: `scaleX(${pct.toFixed(4)})` }} />
+          </div>
+          <div className="np-times tnum">
+            <span>{playing ? fmtDur(elapsed) : '–:––'}</span>
+            {paused && <span className="chip">Paused</span>}
+            <span>{!playing ? '–:––' : live ? 'LIVE' : fmtDur(total)}</span>
+          </div>
         </div>
         {children}
       </div>

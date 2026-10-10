@@ -80,6 +80,7 @@ export function VolumeControl({ volume, pending, onSet, onDelta }: VolumeControl
         min={0}
         max={200}
         value={shown}
+        onChange={() => {}}
         autoComplete="off"
         disabled={pending.has('volume_set')}
         style={{ '--fill': `${shown / 2}%` } as CSSProperties}

@@ -1,36 +1,42 @@
-/* Design tokens — mirrored from the legacy web/pick.html palette so the
- * migrated frontend keeps the same dark theme and green accent. */
+/* Design tokens — the Spotify system: black chrome, #121212 panels,
+ * #1f1f1f elevation, green reserved for function (CTA / active / EQ). */
 :root {
   color-scheme: dark;
 
   /* surfaces */
-  --bg: #0a0a0a;
-  --panel: #131313;
-  --panel-2: #1a1a1a;
-  --row-hover: #1f1f1f;
-  --field: #0d0d0d;
+  --bg: #000000;
+  --panel: #121212;
+  --elev: #1f1f1f;
+  --elev-2: #2a2a2a;
+  --row-hover: rgba(255, 255, 255, 0.1);
+  --field: #242424;
+  --prog-track: #4d4d4d;
 
-  /* lines */
-  --line: rgba(255, 255, 255, 0.09);
-  --line-weak: rgba(255, 255, 255, 0.055);
+  /* lines — Spotify uses surface contrast over borders; keep hairlines only
+   * where a separator carries meaning (input edges, sheet grips) */
+  --line: rgba(255, 255, 255, 0.1);
+  --line-weak: rgba(255, 255, 255, 0.06);
 
   /* text */
   --text: #ffffff;
   --sub: #b3b3b3;
-  --faint: #8f8f8f;
+  --faint: #6a6a6a;
 
-  /* accent — green for function (play/progress/active) */
+  /* accent — green for function only */
   --green: #1ed760;
   --green-hover: #3ce477;
+  --on-green: #04150a;
   --danger: #ff6b81;
 
   /* typography */
-  --sans: 'Poppins', 'Segoe UI', system-ui, sans-serif;
+  --sans: 'Figtree', 'Segoe UI', system-ui, sans-serif;
 
   /* layout */
-  --radius: 12px;
-  --radius-sm: 8px;
+  --radius: 8px;
+  --radius-sm: 4px;
+  --radius-lg: 12px;
   --pad: 16px;
-  --max-width: 720px;
-  --bar-h: 60px;
+  --sidebar-w: 264px;
+  --pbar-h: 80px;
+  --topbar-h: 56px;
 }

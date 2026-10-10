@@ -43,7 +43,7 @@ export class ApiClient {
   private readonly token: string
   private readonly fetchImpl: typeof fetch
 
-  constructor(token: string, fetchImpl: typeof fetch = fetch) {
+  constructor(token: string, fetchImpl: typeof fetch = fetch.bind(globalThis)) {
     this.token = token
     this.fetchImpl = fetchImpl
   }

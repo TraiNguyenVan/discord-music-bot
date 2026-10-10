@@ -1,8 +1,19 @@
-/* Queue panel and phone queue sheet. */
+/* Queue panel (Spotify's right-hand column) and the phone bottom sheet. */
+
+.cols {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 340px;
+  gap: 16px;
+  align-items: start;
+}
 
 .queuecol {
+  position: sticky;
+  top: calc(var(--topbar-h) + 8px);
+  max-height: calc(100vh - var(--topbar-h) - var(--pbar-h) - 24px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
   background: var(--panel);
-  border: 1px solid var(--line);
   border-radius: var(--radius);
   padding: var(--pad);
 }
@@ -21,57 +32,24 @@
 }
 
 .h-sect {
-  font-size: 0.95rem;
+  font-size: 1.05rem;
+  font-weight: 800;
+  letter-spacing: -0.01em;
   margin: 0;
+  text-wrap: balance;
 }
 
 .qcount {
   color: var(--faint);
-  font-weight: 400;
+  font-weight: 500;
   font-size: 0.8rem;
-  margin-left: 6px;
-}
-
-.pill {
-  background: var(--panel-2);
-  border: 1px solid var(--line);
-  color: var(--text);
-  border-radius: 999px;
-  padding: 7px 14px;
-  font: inherit;
-  font-size: 0.8rem;
-  font-weight: 600;
-  cursor: pointer;
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  transition: border-color 150ms ease, color 150ms ease;
-}
-
-.pill:hover {
-  border-color: var(--green);
-}
-
-.pill:focus-visible {
-  outline: 2px solid var(--green);
-  outline-offset: 2px;
-}
-
-.pill:disabled {
-  color: var(--faint);
-  cursor: default;
-}
-
-/* armed state of the two-tap confirm */
-.pill--armed {
-  color: var(--danger);
-  border-color: var(--danger);
+  margin-left: 8px;
 }
 
 .qlist {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 2px;
   min-height: 40px;
 }
 
@@ -79,31 +57,33 @@
   margin: 0;
   color: var(--faint);
   font-size: 0.85rem;
-  padding: 10px 0;
+  padding: 10px 2px;
 }
 
 .nowline {
   margin: 0;
   color: var(--green);
-  font-size: 0.82rem;
-  font-weight: 600;
+  font-size: 0.8rem;
+  font-weight: 700;
+  padding: 4px 2px 0;
 }
 
 .morenote {
   margin: 0;
   color: var(--faint);
   font-size: 0.8rem;
+  padding: 0 2px;
 }
 
-/* queue rows: comfortable spacing, touch-friendly targets */
+/* queue rows: hover reveals the room, actions stay one tap away */
 .qrow {
   display: grid;
   grid-template-columns: 24px minmax(0, 1fr) 36px 36px;
   gap: 10px;
   align-items: center;
-  padding: 8px;
+  padding: 7px 8px;
   border-radius: var(--radius-sm);
-  transition: background 150ms ease;
+  transition: background-color 150ms ease;
 }
 
 .qrow:hover {
@@ -121,6 +101,7 @@
   min-width: 0;
   display: flex;
   flex-direction: column;
+  gap: 2px;
 }
 
 .rtitle {
@@ -132,8 +113,8 @@
 }
 
 .rsub {
-  font-size: 0.76rem;
-  color: var(--faint);
+  font-size: 0.75rem;
+  color: var(--sub);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -141,33 +122,32 @@
 
 .qplay,
 .rm {
-  width: 36px;
-  height: 36px;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--line);
-  background: var(--panel-2);
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  border: 0;
+  background: transparent;
   color: var(--sub);
   display: inline-flex;
   align-items: center;
   justify-content: center;
   cursor: pointer;
-  transition: border-color 150ms ease, color 150ms ease;
+  transition: background-color 150ms ease, color 150ms ease;
 }
 
-.qplay:hover,
-.rm:hover {
-  border-color: var(--green);
+.qplay:hover:not(:disabled) {
+  background: var(--elev-2);
   color: var(--text);
 }
 
-.rm:hover {
-  border-color: var(--danger);
+.rm:hover:not(:disabled) {
+  background: var(--elev-2);
   color: var(--danger);
 }
 
 .qplay:focus-visible,
 .rm:focus-visible {
-  outline: 2px solid var(--green);
+  outline: 2px solid var(--text);
   outline-offset: 2px;
 }
 
@@ -185,7 +165,7 @@
 }
 
 .qinfo {
-  font-size: 0.78rem;
+  font-size: 0.75rem;
   color: var(--faint);
 }
 
@@ -204,15 +184,23 @@
   position: fixed;
   inset: 0;
   z-index: 39;
-  background: rgba(0, 0, 0, 0.5);
+  background: rgba(0, 0, 0, 0.6);
+}
+
+/* ---- responsive ---- */
+@media (max-width: 1100px) {
+  .cols {
+    grid-template-columns: 1fr;
+  }
+
+  .queuecol {
+    position: static;
+    max-height: none;
+    overflow: visible;
+  }
 }
 
 @media (max-width: 680px) {
-  /* the mini player moves to the bottom bar on phones */
-  .mini {
-    display: none !important;
-  }
-
   /* the queue column becomes a bottom sheet opened from the bar */
   .queuecol {
     position: fixed;
@@ -224,8 +212,7 @@
     max-height: 82vh;
     overflow-y: auto;
     overscroll-behavior: contain;
-    border-bottom: 0;
-    border-radius: 18px 18px 0 0;
+    border-radius: var(--radius-lg) var(--radius-lg) 0 0;
     padding: 0 14px calc(14px + env(safe-area-inset-bottom));
     box-shadow: 0 -18px 50px rgba(0, 0, 0, 0.55);
     transform: translateY(104%);
@@ -250,7 +237,7 @@
     z-index: 3;
     justify-content: flex-end;
     align-items: center;
-    padding: 8px 0 4px;
+    padding: 10px 0 4px;
     margin: 0 -14px;
     padding-right: 14px;
     background: linear-gradient(var(--panel) 65%, transparent);
@@ -260,7 +247,7 @@
     content: '';
     position: absolute;
     left: 50%;
-    top: 15px;
+    top: 8px;
     width: 36px;
     height: 4px;
     border-radius: 2px;

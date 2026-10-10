@@ -123,7 +123,7 @@ export function QueuePanel({
   const view = page === 1 ? nowView : (pageView ?? LOADING_VIEW)
 
   return (
-    <aside className="queuecol" aria-label="Queue">
+    <aside className="queuecol" id="queue" aria-label="Queue">
       <div className="sheet-grip">
         {onClose && (
           <button type="button" className="iconbtn" aria-label="Close the queue" title="Close" onClick={onClose}>

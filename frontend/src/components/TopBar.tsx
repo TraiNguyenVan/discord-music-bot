@@ -5,7 +5,7 @@ import type { ControlAction, ControlParams, NowState } from '../types/music'
 import type { StatusUpdate } from '../hooks/useMusicSession'
 import { VoicePill } from './VoicePill'
 
-export interface AppHeaderProps {
+export interface TopBarProps {
   session: SessionInfo
   now: NowState | null
   pending: ReadonlySet<string>
@@ -53,18 +53,17 @@ function ExpiryTimer({ expiresIn }: { expiresIn: number | null }) {
   return <span className={urgent ? 'expiry expiry--urgent' : 'expiry'}>{label}</span>
 }
 
-export function AppHeader({ session, now, pending, onControl, onStatus }: AppHeaderProps) {
-  const connected = !!now?.connected
-  const lampClass =
-    'lamp' + (connected ? (now?.playing ? ' lamp--live' : ' lamp--on') : '')
-
+/**
+ * The sticky top bar: voice connect/leave on the left of the cluster,
+ * session identity + expiry in a quiet pill. Mirrors Spotify's topbar with
+ * the user chip on the right.
+ */
+export function TopBar({ session, now, pending, onControl, onStatus }: TopBarProps) {
   return (
-    <header className="app-header">
-      <div className="brand">
-        <span className={lampClass} aria-hidden="true" />
-        <h1>Music Picker</h1>
-      </div>
-      <div className="session-side">
+    <header className="topbar">
+      <h1 className="sr-only">Music Picker</h1>
+      <span className="topbar-note" aria-hidden="true" />
+      <div className="topbar-side">
         <VoicePill
           now={now}
           pending={pending.has('join') || pending.has('leave')}
@@ -76,10 +75,14 @@ export function AppHeader({ session, now, pending, onControl, onStatus }: AppHea
         />
         <span className="session-badge" role="status">
           <CircleCheck size={14} className="state-icon--ok" aria-hidden="true" />
-          <span>{session.guild}</span>
-          {' — '}
+          <span className="badge-guild">{session.guild}</span>
+          <span className="badge-sep" aria-hidden="true">
+            ·
+          </span>
           <span>{session.user}</span>
-          {' · '}
+          <span className="badge-sep" aria-hidden="true">
+            ·
+          </span>
           <ExpiryTimer expiresIn={session.expires_in} />
         </span>
       </div>
